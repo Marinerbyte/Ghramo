@@ -1,0 +1,7 @@
+Flask
+websocket-client
+requests
+psycopg2-binary
+Pillow
+gunicorn
+psutil
