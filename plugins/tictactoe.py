@@ -7,16 +7,20 @@ import os
 import threading
 import traceback
 import urllib3
+import uuid
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+# SSL Warnings silent karein
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- DB IMPORT ---
+# --- MASTER DB IMPORT ---
 try:
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     from db import add_game_result
-except: pass
+except Exception as e:
+    print(f"[DB Error] TicTacToe: {e}")
 
+# --- GLOBAL STATE ---
 games = {} 
 games_lock = threading.Lock()
 BOT_INSTANCE = None 
@@ -25,63 +29,65 @@ BOT_INSTANCE = None
 def setup(bot_ref):
     global BOT_INSTANCE
     BOT_INSTANCE = bot_ref
+    BOT_INSTANCE.log("✅ TicTacToe: Expert Version Loaded.")
 
-# --- HELPER: CIRCULAR AVATAR ---
-def get_circular_avatar(url):
-    try:
-        resp = requests.get(url, timeout=10, verify=False)
-        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-        img = img.resize((150, 150), Image.Resampling.LANCZOS)
-        
-        # Create mask
-        mask = Image.new('L', (150, 150), 0)
-        draw = ImageDraw.Draw(mask)
-        draw.ellipse((0, 0, 150, 150), fill=255)
-        
-        output = ImageOps.fit(img, mask.size, centering=(0.5, 0.5))
-        output.putalpha(mask)
-        return output
-    except:
-        return None
+# --- CLEANER THREAD (90s Inactivity) ---
+def game_cleanup_loop():
+    while True:
+        time.sleep(15)
+        now = time.time()
+        to_remove = []
+        with games_lock:
+            for r_name, g in games.items():
+                if now - g.last_interaction > 90: to_remove.append(r_name)
+            for r_name in to_remove:
+                if BOT_INSTANCE: BOT_INSTANCE.send_message(r_name, "⌛ Match closed due to inactivity.")
+                del games[r_name]
 
-# --- HELPER: UPLOAD ---
+if threading.active_count() < 15: 
+    threading.Thread(target=game_cleanup_loop, daemon=True).start()
+
+# --- HELPER: SAFE FONT ---
+def get_safe_font(size):
+    paths = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "arial.ttf"]
+    for p in paths:
+        try: return ImageFont.truetype(p, size)
+        except: continue
+    return ImageFont.load_default()
+
+# --- HELPER: STABLE UPLOAD (Catbox) ---
 def upload_image(bot, image):
     try:
-        img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format='PNG')
-        img_byte_arr.seek(0)
-        files = {'reqtype': (None, 'fileupload'), 'fileToUpload': ('game.png', img_byte_arr, 'image/png')}
-        r = requests.post('https://catbox.moe/user/api.php', files=files, timeout=15)
+        buf = io.BytesIO()
+        image.save(buf, format='PNG')
+        buf.seek(0)
+        f = {'reqtype': (None, 'fileupload'), 'fileToUpload': ('tic.png', buf, 'image/png')}
+        r = requests.post('https://catbox.moe/user/api.php', files=f, timeout=10)
         return r.text.strip() if r.status_code == 200 else None
     except: return None
 
-# --- VISUALS: BOARD ---
+# --- VISUALS: MODERN NEON BOARD ---
 def draw_board(board_state):
     size = 450
     cell = size // 3
     img = Image.new('RGB', (size, size), color=(15, 17, 26)) 
     d = ImageDraw.Draw(img)
+    fnt_hint = get_safe_font(100) 
     
-    try:
-        fnt_hint = ImageFont.truetype("arial.ttf", 80) # Bade numbers
-        fnt_sym = ImageFont.truetype("arial.ttf", 100)
-    except:
-        fnt_hint = fnt_sym = ImageFont.load_default()
-
     # Grid
     for i in range(1, 3):
-        d.line([(cell*i, 20), (cell*i, size-20)], fill=(45, 48, 65), width=5)
-        d.line([(20, cell*i), (size-20, cell*i)], fill=(45, 48, 65), width=5)
+        d.line([(cell*i, 25), (cell*i, size-25)], fill=(40, 42, 58), width=6)
+        d.line([(25, cell*i), (size-25, cell*i)], fill=(40, 42, 58), width=6)
 
     for i in range(9):
-        row, col = i // 3, i % 3
-        x, y = col * cell, row * cell
+        r, c = i // 3, i % 3
+        x, y = c * cell, r * cell
         cx, cy = x + cell // 2, y + cell // 2
         val = board_state[i]
         
         if val is None:
-            # Faint large hint numbers
-            d.text((cx-25, cy-45), str(i+1), font=fnt_hint, fill=(35, 37, 48)) 
+            # Bade lekin faint numbers (User help)
+            d.text((cx-30, cy-55), str(i+1), font=fnt_hint, fill=(25, 27, 38)) 
         elif val == 'X':
             off = 45
             d.line([(x+off, y+off), (x+cell-off, y+cell-off)], fill=(255, 46, 99), width=16)
@@ -92,35 +98,36 @@ def draw_board(board_state):
     return img
 
 # --- VISUALS: WINNER CARD ---
-def draw_winner_card(username, avatar_url, symbol):
+def draw_winner_card(username, av_url, symbol):
     size = 450
-    img = Image.new('RGB', (size, size), color=(10, 12, 18))
+    img = Image.new('RGB', (size, size), color=(12, 14, 20))
     d = ImageDraw.Draw(img)
     
-    # Neon Border
+    # Border
     color = (255, 46, 99) if symbol == 'X' else (0, 242, 255)
-    d.rectangle([10, 10, size-10, size-10], outline=color, width=8)
+    d.rectangle([10, 10, 440, 440], outline=color, width=10)
 
-    # Avatar
-    av = get_circular_avatar(avatar_url)
-    if av:
-        img.paste(av, (size//2 - 75, 50), av)
-        d.ellipse([size//2-77, 48, size//2+77, 202], outline="white", width=3)
-    
+    # Avatar Crop logic
     try:
-        fnt_win = ImageFont.truetype("arial.ttf", 50)
-        fnt_name = ImageFont.truetype("arial.ttf", 35)
-    except:
-        fnt_win = fnt_name = ImageFont.load_default()
-
-    # Text
-    d.text((size//2 - 100, 220), "WINNER!", fill="yellow", font=fnt_win)
-    d.text((size//2 - 80, 300), f"@{username}", fill="white", font=fnt_name)
-    d.text((size//2 - 30, 360), "🏆", font=fnt_win)
+        if av_url:
+            resp = requests.get(av_url, timeout=5, verify=False)
+            av_img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+            av_img = av_img.resize((180, 180), Image.Resampling.LANCZOS)
+            mask = Image.new('L', (180, 180), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, 180, 180), fill=255)
+            img.paste(av_img, (size//2-90, 60), mask)
+            d.ellipse([size//2-92, 58, size//2+92, 242], outline="white", width=4)
+    except: pass
     
+    fnt_win = get_safe_font(55)
+    fnt_name = get_safe_font(38)
+    d.text((size//2-110, 265), "WINNER!", fill="yellow", font=fnt_win)
+    d.text((size//2-80, 335), f"@{username}", fill="white", font=fnt_name)
+    d.text((size//2-30, 385), "🏆", font=fnt_win)
     return img
 
-class TicTacToeSession:
+# --- SESSION CLASS ---
+class GameSession:
     def __init__(self, room, p1_id, p1_name, p1_av):
         self.room = room
         self.p1_id, self.p1_name, self.p1_av = p1_id, p1_name, p1_av
@@ -131,18 +138,17 @@ class TicTacToeSession:
         self.mode = None # 1: Single, 2: Multi
         self.bet = 0
         self.last_interaction = time.time()
-
     def touch(self): self.last_interaction = time.time()
     def check_win(self):
-        wins = [(0,1,2), (3,4,5), (6,7,8), (0,3,6), (1,4,7), (2,5,8), (0,4,8), (2,4,6)]
-        for a, b, c in wins:
+        wins = [(0,1,2),(3,4,5),(6,7,8),(0,3,6),(1,4,7),(2,5,8),(0,4,8),(2,4,6)]
+        for a,b,c in wins:
             if self.board[a] and self.board[a] == self.board[b] == self.board[c]: return self.board[a]
         return 'draw' if None not in self.board else None
 
 # --- HANDLER ---
 def handle_command(bot, command, room, user, args, data):
     uid = str(data.get('user_id') or data.get('id') or user)
-    av_url = data.get('avatar_url')
+    av = data.get('avatar_url') or ""
     cmd = command.lower().strip()
     
     global games
@@ -151,13 +157,13 @@ def handle_command(bot, command, room, user, args, data):
 
         if cmd == "tic":
             if game: return True
-            games[room] = TicTacToeSession(room, uid, user, av_url)
-            bot.send_message(room, f"🎮 **Tic-Tac-Toe**\n@{user}, choose:\n1️⃣ Single\n2️⃣ Multi")
+            games[room] = GameSession(room, uid, user, av)
+            bot.send_message(room, f"🎮 **Tic-Tac-Toe**\n@{user}, Choose:\n1️⃣ Single\n2️⃣ Multi")
             return True
 
         if game:
             game.touch()
-            # Mode Setup
+            # 1. Mode Setup
             if game.state == 'setup_mode' and uid == game.p1_id:
                 if cmd in ["1", "2"]:
                     game.mode = int(cmd); game.state = 'setup_bet'
@@ -165,7 +171,7 @@ def handle_command(bot, command, room, user, args, data):
                     bot.send_message(room, "💰 Select Bet:\n1️⃣ Free\n2️⃣ Bet 100")
                     return True
 
-            # Bet Setup
+            # 2. Bet Setup
             elif game.state == 'setup_bet' and uid == game.p1_id:
                 if cmd in ["1", "2"]:
                     game.bet = 0 if cmd == "1" else 100
@@ -173,21 +179,21 @@ def handle_command(bot, command, room, user, args, data):
                     game.state = 'playing' if game.mode == 1 else 'waiting_join'
                     if game.mode == 1:
                         url = upload_image(bot, draw_board(game.board))
-                        bot.send_message(room, "🔥 Match Started!"); if url: bot.send_image(room, url)
+                        bot.send_message(room, "🔥 vs Bot! Type 1-9"); if url: bot.send_image(room, url)
                     else: bot.send_message(room, f"⚔️ Lobby Open! Bet: {game.bet}\nType `join` to play.")
                     return True
 
-            # Join
+            # 3. Join Match
             elif game.state == 'waiting_join' and cmd == "join":
                 if uid == game.p1_id: return True
-                game.p2_id, game.p2_name, game.p2_av = uid, user, av_url
+                game.p2_id, game.p2_name, game.p2_av = uid, user, av
                 if game.bet > 0: add_game_result(uid, user, "tictactoe", -game.bet)
                 game.state = 'playing'
                 url = upload_image(bot, draw_board(game.board))
                 bot.send_message(room, f"🥊 Match: @{game.p1_name} vs @{game.p2_name}"); if url: bot.send_image(room, url)
                 return True
 
-            # Move
+            # 4. Gameplay
             elif game.state == 'playing' and cmd.isdigit():
                 idx = int(cmd) - 1
                 if not (0 <= idx <= 8): return False
@@ -195,46 +201,47 @@ def handle_command(bot, command, room, user, args, data):
                 if uid != curr_turn_id or game.board[idx]: return True
                 
                 game.board[idx] = game.turn
-                win = game.check_win()
-                if win:
-                    finish_game(bot, room, game, win)
+                res = game.check_win()
+                if res:
+                    finish_game(bot, room, game, res)
                     return True
 
+                # Switch turn
                 game.turn = 'O' if game.turn == 'X' else 'X'
-                # Bot move logic (kept simple for brevity, same as previous)
                 if game.mode == 1 and game.turn == 'O':
+                    # Simple Bot Move
                     empty = [i for i, x in enumerate(game.board) if x is None]
                     if empty:
                         game.board[random.choice(empty)] = 'O'
-                        b_win = game.check_win()
-                        if b_win: finish_game(bot, room, game, b_win); return True
+                        bres = game.check_win()
+                        if bres: finish_game(bot, room, game, bres); return True
                         game.turn = 'X'
-
+                
                 url = upload_image(bot, draw_board(game.board))
                 if url: bot.send_image(room, url)
                 return True
     return False
 
-def finish_game(bot, room, game, winner):
-    if winner == 'draw':
+def finish_game(bot, room, game, res):
+    if res == 'draw':
         bot.send_message(room, "🤝 Draw! Coins refunded.")
         if game.bet > 0:
             add_game_result(game.p1_id, game.p1_name, "tictactoe", game.bet)
             if game.mode == 2: add_game_result(game.p2_id, game.p2_name, "tictactoe", game.bet)
     else:
-        w_nm = game.p1_name if winner == 'X' else game.p2_name
-        w_id = game.p1_id if winner == 'X' else game.p2_id
-        w_av = game.p1_av if winner == 'X' else game.p2_av
+        w_nm = game.p1_name if res == 'X' else game.p2_name
+        w_id = game.p1_id if res == 'X' else game.p2_id
+        w_av = game.p1_av if res == 'X' else game.p2_av
         
         if w_id != "BOT":
             reward = (500 if game.bet == 0 else 700) if game.mode == 1 else game.bet * 2
             add_game_result(w_id, w_nm, "tictactoe", reward, True)
-            bot.send_message(room, f"🎉 @{w_nm} wins {reward} coins!")
-            card = draw_winner_card(w_nm, w_av, winner)
-            url = upload_image(bot, card)
-            if url: bot.send_image(room, url)
+            bot.send_message(room, f"🎉 @{w_nm} WON {reward} coins!")
+            card = draw_winner_card(w_nm, w_av, res)
+            url = upload_image(bot, card); if url: bot.send_image(room, url)
         else:
-            bot.send_message(room, "🤖 Bot wins!")
-    
+            bot.send_message(room, "🤖 Bot Wins!"); url = upload_image(bot, draw_board(game.board))
+            if url: bot.send_image(room, url)
+            
     with games_lock:
         if room in games: del games[room]
