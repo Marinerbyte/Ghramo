@@ -21,7 +21,9 @@ class PluginManager:
                     self.load_plugin(name)
                     loaded.append(name)
                 except Exception as e:
-                    print(f"[Plugins] Error {name}: {e}")
+                    print(f"[Plugins] Error loading {name}: {e}")
+        # Bot log me batao ki plugins load ho gaye
+        self.bot.log(f"🧩 Plugins Loaded: {', '.join(loaded)}")
         return loaded
 
     def load_plugin(self, name):
@@ -35,33 +37,56 @@ class PluginManager:
 
     def process_message(self, data):
         """
-        Adapts TalkinChat 'room_event' payload to plugin arguments.
-        Payload: {type: 'text', body: 'msg', from: 'user', room: 'roomname'}
+        Processes incoming message from TalkinChat.
+        Expected data format: {"body": "text", "room": "name", "from": "username", ...}
         """
-        text = data.get("body", "")
+        # 1. Safely get text
+        text = data.get("body")
+        if not text: 
+            return # Ignore non-text messages (like images without caption)
+
         room_name = data.get("room")
         user = data.get("from", "Unknown")
         
-        if not text: return
+        # 2. Debug Log (Ye batayega ki bot message padh raha hai)
+        # self.bot.log(f"🔍 Checking: {text} | By: {user}")
 
-        # Parse Command
+        # 3. Parse Command
         cmd = ""
         args = []
-        if text.startswith("!"):
-            parts = text[1:].split(" ")
-            cmd = parts[0]
-            args = parts[1:]
-        else:
-            cmd = text.strip() # For game inputs
         
-        # Dispatch to Plugins
-        for name, module in self.plugins.items():
-            if hasattr(module, 'handle_command'):
-                try:
-                    # Pass standardized arguments
-                    if module.handle_command(self.bot, cmd, room_name, user, args, data):
-                        return True
-                except Exception as e:
-                    print(f"[Plugin Error] {name}: {e}")
-                    traceback.print_exc()
+        if text.startswith("!"):
+            parts = text[1:].split(" ") # Remove '!' and split
+            cmd = parts[0].lower()      # Command ko lowercase karo (tic, ping)
+            args = parts[1:]            # Baaki sab arguments
+            
+            self.bot.log(f"⚡ Command Detected: [{cmd}] in {room_name}")
+
+            # 4. Dispatch to Plugins
+            handled = False
+            for name, module in self.plugins.items():
+                if hasattr(module, 'handle_command'):
+                    try:
+                        # Plugin ko call karo
+                        if module.handle_command(self.bot, cmd, room_name, user, args, data):
+                            self.bot.log(f"✅ Executed by Plugin: {name}")
+                            handled = True
+                            break # Command handle ho gaya, loop roko
+                    except Exception as e:
+                        self.bot.log(f"❌ Plugin Error ({name}): {e}")
+                        traceback.print_exc()
+            
+            if not handled:
+                self.bot.log(f"⚠️ Unknown Command: {cmd}")
+
+        else:
+            # Agar '!' nahi hai, tab bhi game plugins ko bhejo (jaise number guess ya tic tac toe move)
+            cmd = text.strip()
+            for name, module in self.plugins.items():
+                if hasattr(module, 'handle_command'):
+                    try:
+                        if module.handle_command(self.bot, cmd, room_name, user, args, data):
+                            return True
+                    except:
+                        pass
         return False
