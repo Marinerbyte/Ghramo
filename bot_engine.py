@@ -7,8 +7,8 @@ import ssl
 from plugin_loader import PluginManager
 from db import init_db
 
-# Correct URL for TalkinChat
-WS_URL = "wss://chatp.net:5333/"
+# ✅ URL FIXED: Added /server back
+WS_URL = "wss://chatp.net:5333/server"
 
 class TalkinChatBot:
     def __init__(self):
@@ -21,42 +21,44 @@ class TalkinChatBot:
         self.room_details = {} 
         init_db()
         self.plugins = PluginManager(self)
-        self.log("Bot Initialized. Waiting for login...")
+        self.log("Bot Initialized. Ready.")
 
     def log(self, message):
-        # Time stamp ke saath log entry
-        entry = f"[{time.strftime('%X')}] {message}"
-        print(entry) # Terminal me print karega
+        entry = f"[{time.strftime('%H:%M:%S')}] {message}"
+        print(entry)
         self.logs.append(entry)
-        
-        # Requirement: Auto-clean after 100 logs
+        # ✅ Auto-clean logs (Max 100)
         if len(self.logs) > 100:
             self.logs.pop(0)
 
     def login_api(self, username, password):
         self.user_data = {"username": username, "password": password}
-        self.log(f"Credentials set for {username}.")
-        return True, "Ready to connect."
+        self.log(f"Credentials stored. ready to connect.")
+        return True, "Starting..."
 
     def connect_ws(self):
-        if self.running:
-            self.log("⚠️ Bot is already running.")
+        # ✅ FIX: Check ACTUAL connection state, not just 'running' flag
+        if self.ws and self.ws.sock and self.ws.sock.connected:
+            self.log("⚠️ Bot is already connected.")
             return
 
         if not self.user_data: 
-            self.log("❌ Error: No username/password.")
+            self.log("❌ Error: No credentials.")
             return
 
         self.log(f"Connecting to {WS_URL} ...")
         self.running = True
 
-        # SSL Context (Security warnings avoid karne ke liye)
+        # ✅ Added Headers (Looks like a real browser to avoid blocks)
         self.ws = websocket.WebSocketApp(
             WS_URL,
             on_open=self.on_open,
             on_message=self.on_message,
             on_error=self.on_error,
-            on_close=self.on_close
+            on_close=self.on_close,
+            header={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
         )
         
         self.ws_thread = threading.Thread(target=lambda: self.ws.run_forever(
@@ -68,10 +70,9 @@ class TalkinChatBot:
         self.ws_thread.start()
 
     def on_open(self, ws):
-        self.log("✅ WebSocket Connected.")
+        self.log("✅ Connected. Sending Login...")
         self.start_time = time.time()
         
-        # Login Payload Send
         payload = {
             "handler": "login",
             "id": uuid.uuid4().hex,
@@ -82,30 +83,27 @@ class TalkinChatBot:
 
     def on_message(self, ws, message):
         try:
-            # 📥 LOG INCOMING PAYLOAD
+            # 📥 Show Incoming Payload
             self.log(f"📥 RECV: {message}")
             
             data = json.loads(message)
             handler = data.get("handler")
             
-            # --- Login Handler ---
             if handler == "login_event":
                 if data.get("type") == "success":
-                    self.log("✅ Login Successful.")
+                    self.log("✅ Login Authorized.")
                     for room in self.active_rooms:
                         self.join_room(room)
                 else:
                     self.log(f"❌ Login Failed: {data}")
-                    self.disconnect()
+                    self.disconnect() # Stop on bad password
 
-            # --- Room Events ---
             elif handler == "room_event":
                 self.plugins.process_message(data)
                 
                 room_name = data.get("room")
                 event_type = data.get("type")
                 
-                # Room Details Update for UI
                 if room_name:
                     if room_name not in self.room_details:
                         self.room_details[room_name] = {'users': [], 'chat_log': []}
@@ -118,7 +116,6 @@ class TalkinChatBot:
                         log_entry = {'author': author, 'text': text_body, 'type': author_class}
                         self.room_details[room_name]['chat_log'].append(log_entry)
                         
-                        # Keep UI Chat clean (50 msgs)
                         if len(self.room_details[room_name]['chat_log']) > 50:
                             self.room_details[room_name]['chat_log'].pop(0)
 
@@ -127,27 +124,31 @@ class TalkinChatBot:
     
     def on_error(self, ws, error):
         if self.running:
-            self.log(f"❌ WebSocket Error: {error}")
+            self.log(f"❌ Socket Error: {error}")
 
     def on_close(self, ws, close_status_code, close_msg):
+        # ✅ Logic: Agar user ne Stop dabaya hai (running=False), to bas ruk jao.
         if not self.running:
-            self.log("🔒 Bot Stopped by User.")
+            self.log("🔒 Bot Stopped (User Action).")
             return
         
-        self.log("⚠️ Connection Lost. Reconnecting in 5s...")
+        # Agar error aaya (running=True), to Reconnect karo
+        self.log(f"⚠️ Disconnected ({close_msg}). Reconnecting in 5s...")
         time.sleep(5)
+        
+        # ✅ Reconnect ke waqt wapas connect_ws call karenge
+        # (Upar connect_ws me fix kar diya hai taaki loop na ho)
         self.connect_ws()
 
     # --- ACTIONS ---
     def send_json(self, data):
         try:
             if self.ws and self.ws.sock and self.ws.sock.connected:
-                # 📤 LOG OUTGOING PAYLOAD
-                json_data = json.dumps(data)
-                self.log(f"📤 SEND: {json_data}")
-                self.ws.send(json_data)
+                json_str = json.dumps(data)
+                self.log(f"📤 SEND: {json_str}")
+                self.ws.send(json_str)
             else:
-                self.log("⚠️ Cannot Send: Disconnected.")
+                self.log("⚠️ Cannot Send: Not Connected")
         except Exception as e:
             self.log(f"❌ Send Error: {e}")
 
@@ -185,7 +186,7 @@ class TalkinChatBot:
 
     def disconnect(self):
         self.log("🛑 Stopping Bot...")
-        self.running = False  # Flag set False immediately
+        self.running = False # Flag False karte hi reconnect band ho jayega
         self.room_details = {}
         if self.ws:
             try: self.ws.close()
