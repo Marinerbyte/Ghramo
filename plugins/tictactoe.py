@@ -16,15 +16,14 @@ BG_COLOR = (17, 24, 39)
 GRID_COLOR = (139, 92, 246)
 BOARD_SIZE = 500
 
-# Worker Pool (Images Banane ke liye)
-image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+# Worker Pool: Reduced to 5 to prevent overload, but efficient enough
+image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
-# 🔒 SOCKET LOCK (Ye hai wo chabi jo problem solve karegi)
-# Jab tak ek image send nahi ho jati, dusri wait karegi.
+# 🔒 SOCKET LOCK (Critical for Bot Stability)
 SOCKET_LOCK = threading.Lock()
 
 def setup(bot):
-    bot.log("🎮 Tic Tac Toe (Socket Locked) Loaded")
+    bot.log("🎮 Tic Tac Toe (Session Pooled) Loaded")
 
 def get_balance(user_id):
     try:
@@ -45,9 +44,7 @@ class TicTacToeGame:
         self.bot = bot
         self.room = room_name
         self.creator = creator_id
-        
-        # Internal Game Lock
-        self.lock = threading.Lock()
+        self.lock = threading.Lock() # Game Logic Lock
         
         self.players = {"X": creator_id, "O": None}
         self.names = {"X": creator_name, "O": None}
@@ -80,6 +77,7 @@ class TicTacToeGame:
 
     # --- VISUALS ---
     def send_visuals(self, text_msg):
+        # Create full snapshot
         snapshot = {
             'board': self.board[:],
             'turn': self.turn,
@@ -88,19 +86,18 @@ class TicTacToeGame:
         image_executor.submit(self._bg_image_task, snapshot, text_msg, False, None)
 
     def _bg_image_task(self, snap, text, is_win, win_info):
+        # This runs in background thread
         try:
-            # 1. GENERATE (Heavy work, Parallel)
             img = None
             if is_win:
                 img = self.draw_winner(win_info)
             else:
                 img = self.draw_board(snap)
             
-            # 2. UPLOAD (Slow network, Parallel)
+            # Upload using pooled session
             url = utils.upload_image(img)
             
-            # 3. SEND (Socket Write, SERIAL LOCKED)
-            # Yahan hum traffic police laga rahe hain
+            # Send using Socket Lock
             with SOCKET_LOCK:
                 if url:
                     self.bot.send_image(self.room, url)
@@ -112,7 +109,6 @@ class TicTacToeGame:
                         self.bot.send_message(self.room, f"{text}\n(Img Failed)\n`{b_str}`")
                     else:
                         self.bot.send_message(self.room, text)
-                        
         except Exception as e:
             print(f"Err Room {self.room}: {e}")
         finally:
