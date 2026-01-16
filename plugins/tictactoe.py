@@ -5,11 +5,10 @@ import gc
 import concurrent.futures 
 from PIL import Image, ImageDraw, ImageFont
 
-# Local imports
 import utils
 import db
 
-# --- CONFIGURATION (Neon Theme) ---
+# --- CONFIG ---
 NEON_GREEN = (57, 255, 20)
 NEON_PINK = (255, 16, 240)
 NEON_BLUE = (44, 255, 255)
@@ -17,13 +16,16 @@ BG_COLOR = (17, 24, 39)
 GRID_COLOR = (139, 92, 246)
 BOARD_SIZE = 500
 
-# Worker Pool (10 threads for parallel image generation)
+# Worker Pool (Images Banane ke liye)
 image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 
-def setup(bot):
-    bot.log("🎮 Tic Tac Toe (Avatar Winner System) Loaded")
+# 🔒 SOCKET LOCK (Ye hai wo chabi jo problem solve karegi)
+# Jab tak ek image send nahi ho jati, dusri wait karegi.
+SOCKET_LOCK = threading.Lock()
 
-# --- DATABASE ---
+def setup(bot):
+    bot.log("🎮 Tic Tac Toe (Socket Locked) Loaded")
+
 def get_balance(user_id):
     try:
         conn = db.get_connection()
@@ -36,7 +38,7 @@ def get_balance(user_id):
     except: return 0
 
 # ==========================================
-# 📦 GAME CLASS (THE DABBA)
+# 📦 GAME CLASS
 # ==========================================
 class TicTacToeGame:
     def __init__(self, bot, room_name, creator_id, creator_name, icon):
@@ -44,16 +46,12 @@ class TicTacToeGame:
         self.room = room_name
         self.creator = creator_id
         
-        # Har game ka apna lock (Thread Safety)
+        # Internal Game Lock
         self.lock = threading.Lock()
         
-        # Game Data
         self.players = {"X": creator_id, "O": None}
         self.names = {"X": creator_name, "O": None}
-        
-        # Avatar Store (URL save karenge yahan)
         self.avatars = {"X": icon, "O": ""} 
-        
         self.board = [" "] * 9
         self.turn = "X"
         self.status = "MODE_SELECT" 
@@ -61,20 +59,16 @@ class TicTacToeGame:
         self.bet = 0
         self.timer = None
         
-        # Start Timer
         self.reset_timer(90, "inactivity")
         self.bot.send_message(self.room, "🎮 **Tic Tac Toe**\n`1` Single Player\n`2` Multiplayer")
 
-    # --- TIMER ---
     def timeout_task(self, reason):
         with self.lock:
             if self.status == "ENDED": return
-
             if reason == "inactivity":
-                self.bot.send_message(self.room, "⚠️ **Game stopped (Inactivity).** Bets refunded.")
+                self.bot.send_message(self.room, "⚠️ **Stopped (Inactivity).** Refunded.")
                 self.cleanup()
             elif reason == "turn":
-                # Turn Timeout -> Opponent Wins
                 winner = "O" if self.turn == "X" else "X"
                 self.end_game(winner, "Time Out Victory")
 
@@ -84,9 +78,8 @@ class TicTacToeGame:
         self.timer.daemon = True
         self.timer.start()
 
-    # --- IMAGE SENDER (Via Worker Pool) ---
+    # --- VISUALS ---
     def send_visuals(self, text_msg):
-        # Snapshot lo taaki lock free ho jaye
         snapshot = {
             'board': self.board[:],
             'turn': self.turn,
@@ -96,40 +89,41 @@ class TicTacToeGame:
 
     def _bg_image_task(self, snap, text, is_win, win_info):
         try:
+            # 1. GENERATE (Heavy work, Parallel)
             img = None
             if is_win:
-                # Winner Card Banao
                 img = self.draw_winner(win_info)
             else:
-                # Board Banao
                 img = self.draw_board(snap)
             
-            # Upload (Slow Internet handle karega)
+            # 2. UPLOAD (Slow network, Parallel)
             url = utils.upload_image(img)
             
-            if url:
-                self.bot.send_image(self.room, url)
-                self.bot.send_message(self.room, text)
-            else:
-                # Fallback Text
-                if not is_win:
-                    b_str = "\n".join([" | ".join(snap['board'][i:i+3]) for i in range(0, 9, 3)])
-                    self.bot.send_message(self.room, f"{text}\n(Img Failed)\n`{b_str}`")
-                else:
+            # 3. SEND (Socket Write, SERIAL LOCKED)
+            # Yahan hum traffic police laga rahe hain
+            with SOCKET_LOCK:
+                if url:
+                    self.bot.send_image(self.room, url)
                     self.bot.send_message(self.room, text)
+                else:
+                    # Fallback
+                    if not is_win:
+                        b_str = "\n".join([" | ".join(snap['board'][i:i+3]) for i in range(0, 9, 3)])
+                        self.bot.send_message(self.room, f"{text}\n(Img Failed)\n`{b_str}`")
+                    else:
+                        self.bot.send_message(self.room, text)
+                        
         except Exception as e:
-            print(f"Img Error {self.room}: {e}")
+            print(f"Err Room {self.room}: {e}")
         finally:
             if img: del img
             gc.collect()
 
-    # --- GRAPHICS ENGINE ---
+    # --- GRAPHICS ---
     def draw_board(self, data):
         canvas = utils.create_canvas(BOARD_SIZE, BOARD_SIZE, color=BG_COLOR)
         draw = ImageDraw.Draw(canvas)
         w = 8
-        
-        # Grid Lines
         draw.line([(166, 20), (166, 480)], fill=GRID_COLOR, width=w)
         draw.line([(332, 20), (332, 480)], fill=GRID_COLOR, width=w)
         draw.line([(20, 166), (480, 166)], fill=GRID_COLOR, width=w)
@@ -147,60 +141,37 @@ class TicTacToeGame:
         return canvas
 
     def draw_winner(self, info):
-        # 1. Canvas Setup
         canvas = utils.create_canvas(BOARD_SIZE, BOARD_SIZE, color=BG_COLOR)
-        
-        # 2. Gradient Glow (Winner's Color)
         glow = (60, 0, 60) if info['sym'] == "X" else (0, 60, 0)
         utils.draw_gradient_bg(canvas, BG_COLOR, glow)
-        
         draw = ImageDraw.Draw(canvas)
         cx, cy = BOARD_SIZE//2, BOARD_SIZE//2 - 50
-        
-        # 3. AVATAR DRAWING (Center)
-        # Border Color determine karo
         border = NEON_PINK if info['sym'] == "X" else NEON_GREEN
+        utils.draw_circle_avatar(canvas, info['av'], cx-75, cy-75, 150, border_color=border, border_width=6)
         
-        # Utils wala function use kar rahe hain jo DP download karke circle banata hai
-        # Size: 150x150 pixels
-        utils.draw_circle_avatar(
-            canvas, 
-            url=info['av'], 
-            x=cx-75, 
-            y=cy-75, 
-            size=150, 
-            border_color=border, 
-            border_width=6
-        )
-        
-        # 4. Text Info
-        f_m = utils.get_font("arial.ttf", 45) # Username
-        f_s = utils.get_font("arial.ttf", 25) # Label
-        
+        f_m = utils.get_font("arial.ttf", 45)
+        f_s = utils.get_font("arial.ttf", 25)
         draw.text((cx, cy+100), "🏆 WINNER 🏆", font=f_s, fill=(200,200,200), anchor="mm")
         draw.text((cx, cy+145), info['name'], font=f_m, fill="white", anchor="mm")
-        
         prize = f"💰 +{info['amt']} Coins" if info['amt'] > 0 else "👑 Victory!"
         draw.text((cx, cy+190), prize, font=f_s, fill=NEON_BLUE, anchor="mm")
-        
         return canvas
 
-    # --- GAME LOGIC ---
+    # --- LOGIC ---
     def process_input(self, cmd, user_id, user_name, icon):
         with self.lock:
-            # 1. SELECT MODE
+            # 1. MODE
             if self.status == "MODE_SELECT" and user_id == self.creator:
                 if cmd == "1":
                     self.mode = "single"
                     self.players['O'] = "BOT"; self.names['O'] = "Bot 🤖"
-                    # Bot ke liye Fake Avatar
-                    self.avatars['O'] = "https://robohash.org/talkinbot.png?set=set1&bgset=bg2"
+                    self.avatars['O'] = "https://robohash.org/talkinbot.png?set=set1"
                     self.status = "PLAYING"
                     self.send_visuals("🤖 Single Player Started!")
                     self.reset_timer(30, "turn")
                 elif cmd == "2":
                     self.mode = "multi"; self.status = "BET_TYPE"
-                    self.bot.send_message(self.room, "⚖️ **Multiplayer Options**\n`1` With Bet\n`2` No Bet")
+                    self.bot.send_message(self.room, "⚖️ **Multiplayer**\n`1` With Bet\n`2` No Bet")
                     self.reset_timer(90, "inactivity")
                 return True
 
@@ -211,11 +182,11 @@ class TicTacToeGame:
                     self.bot.send_message(self.room, "💰 Enter Amount:")
                 elif cmd == "2":
                     self.bet = 0; self.status = "WAITING"
-                    self.bot.send_message(self.room, "⚔️ Fun Mode! Waiting for opponent... Type `join`.")
+                    self.bot.send_message(self.room, "⚔️ Fun Mode! Type `join`.")
                 self.reset_timer(90, "inactivity")
                 return True
 
-            # 3. BET AMOUNT
+            # 3. BET AMT
             if self.status == "BET_AMT" and user_id == self.creator and cmd.isdigit():
                 amt = int(cmd)
                 if amt <= 0: return True
@@ -224,7 +195,7 @@ class TicTacToeGame:
                     self.bot.send_message(self.room, f"❌ Low Balance: {bal}")
                     return True
                 self.bet = amt; self.status = "WAITING"
-                self.bot.send_message(self.room, f"⚔️ Bet: {amt}. Waiting for opponent... Type `join`.")
+                self.bot.send_message(self.room, f"⚔️ Bet: {amt}. Type `join`.")
                 self.reset_timer(90, "inactivity")
                 return True
 
@@ -234,12 +205,7 @@ class TicTacToeGame:
                 if self.bet > 0 and get_balance(user_id) < self.bet:
                     self.bot.send_message(self.room, "❌ Low Balance!")
                     return True
-                
-                self.players['O'] = user_id
-                self.names['O'] = user_name
-                # Joiner ka Avatar Save karo
-                self.avatars['O'] = icon 
-                
+                self.players['O'] = user_id; self.names['O'] = user_name; self.avatars['O'] = icon 
                 self.status = "PLAYING"
                 self.send_visuals(f"⚔️ Match On! @{self.names['X']} vs @{user_name}")
                 self.reset_timer(30, "turn")
@@ -261,7 +227,6 @@ class TicTacToeGame:
                     
                     self.turn = "O" if self.turn == "X" else "X"
                     
-                    # BOT Logic
                     if self.mode == "single" and self.turn == "O":
                         av = [i for i,x in enumerate(self.board) if x==" "]
                         if av:
@@ -295,7 +260,6 @@ class TicTacToeGame:
             l_uid = self.players[l_sym]
             amt = self.bet
             
-            # DB Updates
             if self.mode == "single":
                 amt = 500
                 db.add_game_result(w_uid, self.names[winner_sym], "tic_tac_toe", amt, is_win=True)
@@ -303,14 +267,7 @@ class TicTacToeGame:
                 db.add_game_result(w_uid, self.names[winner_sym], "tic_tac_toe", amt, is_win=True)
                 db.add_game_result(l_uid, self.names[l_sym], "tic_tac_toe", -amt, is_win=False)
             
-            # --- WINNER CARD ---
-            info = {
-                'name': self.names[winner_sym], 
-                'av': self.avatars.get(winner_sym, ""), # Pass Avatar URL
-                'sym': winner_sym, 
-                'amt': amt
-            }
-            # Submit to worker pool
+            info = {'name': self.names[winner_sym], 'av': self.avatars.get(winner_sym, ""), 'sym': winner_sym, 'amt': amt}
             image_executor.submit(self._bg_image_task, None, f"🏆 **{reason}**! {self.names[winner_sym]} Wins!", True, info)
 
         self.cleanup()
@@ -329,10 +286,8 @@ active_games = {}
 def handle_command(bot, command, room_name, user, args, data):
     cmd = command.lower().strip()
     uid = str(data.get("user_id", user))
-    
-    # 🔍 Safely grab Avatar URL
     icon = data.get("icon", data.get("avatar", ""))
-    
+
     if cmd == "tic":
         if not args: return False
         if args[0] == "0":
@@ -346,9 +301,7 @@ def handle_command(bot, command, room_name, user, args, data):
             if room_name in active_games:
                 bot.send_message(room_name, "⚠️ Game running!")
                 return True
-            # New Dabba Create Karo
-            new_game = TicTacToeGame(bot, room_name, uid, user, icon)
-            active_games[room_name] = new_game
+            active_games[room_name] = TicTacToeGame(bot, room_name, uid, user, icon)
             return True
 
     if room_name in active_games:
