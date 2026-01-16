@@ -56,9 +56,9 @@ def fancy_text(text):
     fancy  = "ᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ₀₁₂₃₄₅₆₇₈₉"
     return str(text).translate(str.maketrans(normal, fancy))
 
-# --- 3. GRAPHIC ENGINE (Fixed create_canvas) ---
+# --- 3. GRAPHIC ENGINE ---
 
-def create_canvas(w, h, color=(0, 0, 0)): # Changed 'bg_color' to 'color' to match plugin usage
+def create_canvas(w, h, color=(0, 0, 0)): 
     """Naya board banana."""
     return Image.new('RGB', (w, h), color=color)
 
@@ -104,7 +104,7 @@ def draw_rounded_rect(canvas, coords, radius, color, width=0, outline=None):
     else:
         d.rounded_rectangle(coords, radius=radius, fill=color)
 
-# --- 4. MEDIA UPLOADERS ---
+# --- 4. MEDIA UPLOADERS (FIXED) ---
 
 def upload_image(image):
     url = None
@@ -117,10 +117,21 @@ def upload_image(image):
             'reqtype': (None, 'fileupload'),
             'fileToUpload': (f'bot_img_{int(time.time())}.png', buf, 'image/png')
         }
-        r = requests.post('https://catbox.moe/user/api.php', files=files, timeout=12)
+        
+        # Timeout badha diya (30s) aur Debug Prints lagaye
+        print("[Utils] Uploading image...") 
+        r = requests.post('https://catbox.moe/user/api.php', files=files, timeout=30, verify=False)
+        
         if r.status_code == 200 and "http" in r.text:
             url = r.text.strip()
+            print(f"[Utils] Upload Success: {url}")
+        else:
+            print(f"[Utils] Upload Failed. Code: {r.status_code}, Resp: {r.text}")
+            
         buf.close()
-    except: pass
+    except Exception as e:
+        print(f"[Utils] Upload Error: {e}") # Yahan pata chalega asli error
+        pass
+        
     gc.collect()
     return url
