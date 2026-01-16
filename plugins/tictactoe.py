@@ -1,274 +1,386 @@
-import time, random, threading, sys, os, traceback, gc
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+import time
+import threading
+import random
+import io
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+# Local imports based on your structure
 import utils
+import db
 
-# --- DB IMPORT ---
-try:
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    from db import add_game_result
-except: pass
+# --- CONFIGURATION ---
+NEON_GREEN = (57, 255, 20)
+NEON_PINK = (255, 16, 240)
+NEON_BLUE = (44, 255, 255)
+BG_COLOR = (17, 24, 39) # Dark background
+GRID_COLOR = (139, 92, 246) # Purple glow
+BOARD_SIZE = 500
 
-games = {} 
-games_lock = threading.Lock()
-BOT_INSTANCE = None 
+# --- STATE MANAGEMENT ---
+# Structure: { room_name: { status, board, players, bet, turn, timers, ... } }
+games = {}
+game_lock = threading.Lock()
 
-def setup(bot_ref):
-    global BOT_INSTANCE
-    BOT_INSTANCE = bot_ref
-    BOT_INSTANCE.log("✅ TicTacToe: Neon UI & Multiplayer Fixed.")
+def setup(bot):
+    bot.log("🎮 Tic Tac Toe (Neon Edition) Loaded")
 
-# --- CLEANER THREAD (90s Timeout) ---
-def game_cleanup_loop():
-    while True:
-        time.sleep(10)
-        now = time.time()
-        to_remove = []
+# --- DATABASE HELPERS (READ ONLY) ---
+def get_user_balance(user_id):
+    """Safely checks user balance without writing to DB."""
+    try:
+        conn = db.get_connection()
+        cur = conn.cursor()
+        # Handle Postgres vs SQLite placeholders
+        ph = "%s" if db.DATABASE_URL.startswith("postgres") else "?"
+        cur.execute(f"SELECT global_score FROM users WHERE user_id = {ph}", (str(user_id),))
+        row = cur.fetchone()
+        conn.close()
+        return row[0] if row else 0
+    except:
+        return 0
+
+# --- IMAGE GENERATION ENGINE ---
+
+def draw_neon_board(game_data):
+    """Generates the glowing game board."""
+    # Create Base
+    canvas = utils.create_canvas(BOARD_SIZE, BOARD_SIZE, color=BG_COLOR)
+    draw = ImageDraw.Draw(canvas)
+    
+    # Draw Grid (Neon Style)
+    width = 8
+    # Vertical
+    draw.line([(166, 20), (166, 480)], fill=GRID_COLOR, width=width)
+    draw.line([(332, 20), (332, 480)], fill=GRID_COLOR, width=width)
+    # Horizontal
+    draw.line([(20, 166), (480, 166)], fill=GRID_COLOR, width=width)
+    draw.line([(20, 332), (480, 332)], fill=GRID_COLOR, width=width)
+
+    # Helper function to get coordinates for box ID (1-9)
+    def get_center(idx):
+        row = (idx - 1) // 3
+        col = (idx - 1) % 3
+        return (col * 166 + 83, row * 166 + 83)
+
+    # Draw Marks (X and O)
+    font_lg = utils.get_font("arial.ttf", 100)
+    font_sm = utils.get_font("arial.ttf", 40)
+    
+    for i, mark in enumerate(game_data['board']):
+        cx, cy = get_center(i + 1)
         
-        with games_lock:
-            for r, g in games.items():
-                # Check 90s inactivity
-                if now - g.last_interaction > 90:
-                    to_remove.append(r)
-            
-            for r in to_remove:
-                g = games[r]
-                # Refund logic
-                if g.bet > 0:
-                    add_game_result(g.p1_id, g.p1_name, "tictactoe", g.bet, False)
-                    if g.p2_id and g.p2_id != "BOT":
-                        add_game_result(g.p2_id, g.p2_name, "tictactoe", g.bet, False)
-                
-                if BOT_INSTANCE:
-                    BOT_INSTANCE.send_message(r, "⌛ Game ended due to inactivity. (Bets refunded)")
-                del games[r]
-                gc.collect()
+        if mark == "X":
+            # Neon X
+            draw.text((cx, cy), "X", font=font_lg, fill=NEON_PINK, anchor="mm", stroke_width=2, stroke_fill=(255, 200, 255))
+        elif mark == "O":
+            # Neon O
+            draw.text((cx, cy), "O", font=font_lg, fill=NEON_GREEN, anchor="mm", stroke_width=2, stroke_fill=(200, 255, 200))
+        else:
+            # Ghost Numbers (1-9) for guidance
+            draw.text((cx, cy), str(i+1), font=font_sm, fill=(60, 60, 70), anchor="mm")
 
-threading.Thread(target=game_cleanup_loop, daemon=True).start()
+    return canvas
 
-# --- VISUALS: PREMIUM DARK NEON BOARD ---
-def build_board(board_state):
-    # 1. Ultra Dark Background (Cyberpunk feel)
-    canv = utils.create_canvas(450, 450, color=(5, 5, 10)) 
-    d = ImageDraw.Draw(canv)
+def draw_winner_card(winner_name, winner_avatar_url, symbol, amount):
+    """Generates a celebratory winner card."""
+    canvas = utils.create_canvas(BOARD_SIZE, BOARD_SIZE, color=BG_COLOR)
     
-    # 2. Glowing Grid (Cyan Neon)
-    # Layer 1: Wide faint glow
-    for i in range(1, 3):
-        d.line([(150*i, 20), (150*i, 430)], fill=(0, 100, 100), width=10)
-        d.line([(20, 150*i), (430, 150*i)], fill=(0, 100, 100), width=10)
-    # Layer 2: Sharp bright center
-    for i in range(1, 3):
-        d.line([(150*i, 20), (150*i, 430)], fill=(0, 255, 255), width=4)
-        d.line([(20, 150*i), (430, 150*i)], fill=(0, 255, 255), width=4)
+    # Background Glow
+    utils.draw_gradient_bg(canvas, BG_COLOR, (30, 0, 30) if symbol == "X" else (0, 30, 0))
+    
+    draw = ImageDraw.Draw(canvas)
+    
+    # Draw Avatar
+    cx, cy = BOARD_SIZE // 2, BOARD_SIZE // 2 - 50
+    utils.draw_circle_avatar(canvas, winner_avatar_url, cx - 60, cy - 60, 120, border_color=NEON_PINK if symbol == "X" else NEON_GREEN)
 
-    # 3. Ghost Hint Numbers
-    fnt_hint = utils.get_font("arial.ttf", 100)
-    
-    for i, val in enumerate(board_state):
-        r, c = i // 3, i % 3
-        bx, by = c * 150, r * 150
-        cx, cy = bx + 75, by + 75
-        
-        if val is None:
-            # Subtle Grey Number
-            d.text((cx-30, cy-60), str(i+1), font=fnt_hint, fill=(30, 35, 45))
-        
-        elif val == "X":
-            # Sharp Red Cross
-            off = 40
-            # Shadow
-            d.line([(bx+off+2, by+off+2), (bx+150-off+2, by+150-off+2)], fill=(100, 0, 0), width=14)
-            d.line([(bx+150-off+2, by+off+2), (bx+off+2, by+150-off+2)], fill=(100, 0, 0), width=14)
-            # Main
-            d.line([(bx+off, by+off), (bx+150-off, by+150-off)], fill=(255, 0, 60), width=12)
-            d.line([(bx+150-off, by+off), (bx+off, by+150-off)], fill=(255, 0, 60), width=12)
-            
-        elif val == "O":
-            # Sharp Blue Circle
-            off = 40
-            # Shadow
-            d.ellipse([bx+off+2, by+off+2, bx+150-off+2, by+150-off+2], outline=(0, 0, 100), width=14)
-            # Main
-            d.ellipse([bx+off, by+off, bx+150-off, by+150-off], outline=(0, 150, 255), width=12)
-            
-    return canv
+    # Text Info
+    font_main = utils.get_font("arial.ttf", 40)
+    font_sub = utils.get_font("arial.ttf", 25)
 
-def build_winner_card(username, av_url, symbol):
-    canv = utils.create_canvas(450, 450)
-    utils.draw_gradient_bg(canv, (10, 10, 20), (5, 5, 10))
+    draw.text((cx, cy + 80), "WINNER", font=font_sub, fill=(200, 200, 200), anchor="mm")
+    draw.text((cx, cy + 120), winner_name, font=font_main, fill="white", anchor="mm")
     
-    color = (255, 0, 60) if symbol == "X" else (0, 150, 255)
-    utils.draw_rounded_rect(canv, [15, 15, 435, 435], 25, color, width=8)
-    utils.draw_circle_avatar(canv, av_url, 135, 60, 180, border_color=color)
-    
-    fnt_win = utils.get_font("impact.ttf", 60)
-    fnt_name = utils.get_font("bebas-neue.ttf", 45)
-    
-    d = ImageDraw.Draw(canv)
-    d.text((120, 270), "WINNER!", font=fnt_win, fill="yellow")
-    d.text((140, 345), f"@{username[:12]}", font=fnt_name, fill="white")
-    return canv
+    prize_text = f"Won {amount} Coins!" if amount > 0 else "Victory!"
+    draw.text((cx, cy + 160), prize_text, font=font_sub, fill=NEON_BLUE, anchor="mm")
+
+    return canvas
 
 # --- GAME LOGIC ---
-class TicGame:
-    def __init__(self, room, p1_id, p1_name, p1_av):
-        self.room = room
-        self.p1_id, self.p1_name, self.p1_av = p1_id, p1_name, p1_av
-        self.p2_id = self.p2_name = self.p2_av = None
-        self.board = [None] * 9
-        self.turn = 'X'
-        self.state = 'setup_mode'
-        self.mode = None
-        self.bet = 0
-        self.last_interaction = time.time()
-    def touch(self): self.last_interaction = time.time()
 
-def check_win(b):
-    w = [(0,1,2),(3,4,5),(6,7,8),(0,3,6),(1,4,7),(2,5,8),(0,4,8),(2,4,6)]
-    for a,x,c in w:
-        if b[a] and b[a] == b[x] == b[c]: return b[a]
-    return 'draw' if None not in b else None
-
-def bot_move(board):
-    empty = [i for i, x in enumerate(board) if x is None]
-    if not empty: return None
-    for m in empty: # Win
-        board[m] = 'O'; 
-        if check_win(board) == 'O': board[m] = None; return m
-        board[m] = None
-    for m in empty: # Block
-        board[m] = 'X'; 
-        if check_win(board) == 'X': board[m] = None; return m
-        board[m] = None
-    return random.choice(empty)
-
-# --- HANDLER ---
-def handle_command(bot, command, room, user, args, data):
-    uid = str(data.get('user_id') or data.get('userid') or user)
-    av = data.get('avatar_url') or ""
-    cmd = command.lower().strip()
-    
-    global games
-    with games_lock:
-        game = games.get(room)
-
-        # 1. START GAME
-        if cmd == "tic":
-            if game:
-                bot.send_message(room, f"⚠️ Game running! Finish or type `stop`.")
-                return True
-            games[room] = TicGame(room, uid, user, av)
-            bot.send_message(room, f"🎮 **Tic-Tac-Toe**\n@{user}, Choose Mode:\n1️⃣ Single (vs Bot)\n2️⃣ Multi (vs Player)")
-            return True
-
-        if cmd == "stop" and game:
-            # Check Admin or Player
-            if uid == str(game.p1_id) or (game.p2_id and uid == str(game.p2_id)) or (db.is_admin(uid) if 'db' in globals() else False):
-                if game.bet > 0:
-                    add_game_result(game.p1_id, game.p1_name, "tictactoe", game.bet, False)
-                    if game.p2_id and game.p2_id != "BOT":
-                        add_game_result(game.p2_id, game.p2_name, "tictactoe", game.bet, False)
-                    bot.send_message(room, "🛑 Game Stopped. Bets Refunded.")
-                else:
-                    bot.send_message(room, "🛑 Game Stopped.")
-                del games[room]
-                gc.collect()
-            return True
-
-        if game:
-            game.touch() # Reset 90s timer
+def stop_game(room_name, reason="Game Stopped."):
+    """Cleans up game, cancels timers, refunds if needed."""
+    with game_lock:
+        if room_name in games:
+            game = games[room_name]
             
-            # 2. MODE SELECT
-            if game.state == 'setup_mode' and uid == str(game.p1_id):
-                if cmd == "1":
-                    game.mode = 1; game.p2_name, game.p2_id = "Bot", "BOT"
-                    # Single player starts immediately
-                    game.state = 'playing'
-                    url = utils.upload_image(build_board(game.board))
-                    bot.send_message(room, "🔥 **VS PRO BOT**\nReward: 500. Your Turn (1-9):")
-                    if url: bot.send_image(room, url)
-                    return True
-                elif cmd == "2":
-                    game.mode = 2; game.state = 'setup_bet'
-                    bot.send_message(room, "💰 **Betting?**\n1️⃣ Fun (No Bet)\n2️⃣ Bet 100")
-                    return True
-
-            # 3. BET SELECT (Multi Only)
-            elif game.state == 'setup_bet' and uid == str(game.p1_id):
-                if cmd in ["1", "2"]:
-                    game.bet = 0 if cmd == "1" else 100
-                    if game.bet > 0: add_game_result(game.p1_id, game.p1_name, "tictactoe", -game.bet)
-                    game.state = 'waiting_join'
-                    bot.send_message(room, f"⚔️ **Lobby Open!** Bet: {game.bet}\nType `join` to play.")
-                    return True
-
-            # 4. JOIN (Multi Only)
-            elif game.state == 'waiting_join' and cmd == "join":
-                if uid == str(game.p1_id): return True
-                game.p2_id, game.p2_name, game.p2_av = uid, user, av
-                if game.bet > 0: add_game_result(uid, user, "tictactoe", -game.bet)
-                game.state = 'playing'
-                url = utils.upload_image(build_board(game.board))
-                bot.send_message(room, f"🥊 **MATCH START!**\n@{game.p1_name} (X) vs @{game.p2_name} (O)\n@{game.p1_name}, your move!")
-                if url: bot.send_image(room, url)
-                return True
-
-            # 5. PLAY MOVE
-            elif game.state == 'playing' and cmd.isdigit():
-                idx = int(cmd) - 1
-                if not (0 <= idx <= 8): return False
-                
-                # Turn & ID Check (Fixed)
-                curr_turn_id = str(game.p1_id) if game.turn == 'X' else str(game.p2_id)
-                if uid != curr_turn_id: return True # Ignore wrong player
-                if game.board[idx]: return True # Ignore taken box
-                
-                # Apply Move
-                game.board[idx] = game.turn
-                res = check_win(game.board)
-                if res: finish_match(bot, room, game, res); return True
-
-                # Switch Turn
-                game.turn = 'O' if game.turn == 'X' else 'X'
-                
-                # Bot Logic
-                if game.mode == 1 and game.turn == 'O':
-                    m = bot_move(game.board)
-                    if m is not None:
-                        game.board[m] = 'O'
-                        res = check_win(game.board)
-                        if res: finish_match(bot, room, game, res); return True
-                        game.turn = 'X'
-
-                url = utils.upload_image(build_board(game.board))
-                if url: bot.send_image(room, url)
-                return True
+            # Cancel Timers
+            if game.get('timer_obj'):
+                game['timer_obj'].cancel()
+            
+            # Refund Logic (Only checks, doesn't actually refund because we only deduct on loss)
+            # Since we implement "Winner takes all, Loser pays at end", 
+            # simply stopping means no database transaction occurs. Safe.
+            
+            del games[room_name]
+            return True
     return False
 
-def finish_match(bot, room, game, res):
-    if res == 'draw':
-        bot.send_message(room, "🤝 **Draw!** Bet refunded.")
-        if game.bet > 0:
-            add_game_result(game.p1_id, game.p1_name, "tictactoe", game.bet)
-            if game.p2_id != "BOT": add_game_result(game.p2_id, game.p2_name, "tictactoe", game.bet)
+def timeout_handler(bot, room_name, type="inactivity"):
+    """Handles auto-stop events."""
+    with game_lock:
+        if room_name not in games: return
+        game = games[room_name]
+        
+    if type == "inactivity":
+        bot.send_message(room_name, "⚠️ **Game stopped due to inactivity.** All bets have been refunded.")
+        stop_game(room_name)
+    
+    elif type == "turn":
+        # Turn timeout - Auto forfeit
+        current_turn = game['turn']
+        # Swap turn to find winner
+        winner_sym = "O" if current_turn == "X" else "X"
+        winner_uid = game['players'][winner_sym]
+        loser_uid = game['players'][current_turn]
+        
+        bot.send_message(room_name, f"⏳ @{game['names'][current_turn]} ran out of time!")
+        end_game(bot, room_name, winner_sym, "Time Out")
+
+def reset_timer(bot, room_name, duration=90, type="inactivity"):
+    """Resets the game timer."""
+    with game_lock:
+        if room_name not in games: return
+        
+        # Cancel old timer
+        if games[room_name].get('timer_obj'):
+            games[room_name]['timer_obj'].cancel()
+        
+        # Start new timer
+        t = threading.Timer(duration, timeout_handler, [bot, room_name, type])
+        games[room_name]['timer_obj'] = t
+        t.start()
+
+def check_win(board):
+    wins = [(0,1,2), (3,4,5), (6,7,8), (0,3,6), (1,4,7), (2,5,8), (0,4,8), (2,4,6)]
+    for a,b,c in wins:
+        if board[a] == board[b] == board[c] and board[a] != " ":
+            return board[a]
+    if " " not in board:
+        return "Draw"
+    return None
+
+def end_game(bot, room_name, winner_sym, reason):
+    game = games[room_name]
+    
+    # 1. Image Generation
+    if winner_sym == "Draw":
+        bot.send_message(room_name, "🤝 **It's a Draw!** No coins lost.")
     else:
-        if res == 'X': w_id, w_nm, w_av = game.p1_id, game.p1_name, game.p1_av
-        else: w_id, w_nm, w_av = game.p2_id, game.p2_name, game.p2_av
-
-        if str(w_id) == "BOT":
-            bot.send_message(room, "🤖 **Bot Wins!**")
+        winner_uid = game['players'][winner_sym]
+        loser_sym = "O" if winner_sym == "X" else "X"
+        loser_uid = game['players'][loser_sym]
+        winner_name = game['names'][winner_sym]
+        
+        # 2. Score Handling
+        amt = game['bet']
+        if game['mode'] == "single":
+            amt = 500 # Fixed prize for single player
+            db.add_game_result(winner_uid, winner_name, "tic_tac_toe", amt, is_win=True)
+        elif game['mode'] == "multi":
+            if amt > 0:
+                # Winner gets +amt
+                db.add_game_result(winner_uid, winner_name, "tic_tac_toe", amt, is_win=True)
+                # Loser gets -amt
+                db.add_game_result(loser_uid, game['names'][loser_sym], "tic_tac_toe", -amt, is_win=False)
+        
+        # 3. Send Visuals
+        # Get Avatar (Passed in data or default)
+        av_url = game.get('avatars', {}).get(winner_sym, "")
+        
+        img = draw_winner_card(winner_name, av_url, winner_sym, amt)
+        url = utils.upload_image(img)
+        
+        bot.send_message(room_name, f"🏆 **{reason}**")
+        if url:
+            bot.send_image(room_name, url)
         else:
-            reward = 0
-            if game.mode == 1: reward = 500
-            else: reward = (game.bet * 2) if game.bet > 0 else 500
-            
-            add_game_result(w_id, w_nm, "tictactoe", reward, True)
-            bot.send_message(room, f"🏆 **@{w_nm} WINS!** +{reward} Coins")
-            
-            url = utils.upload_image(build_winner_card(w_nm, w_av, res))
-            if url: bot.send_image(room, url)
+            bot.send_message(room_name, f"🎉 {winner_name} Wins {amt} Coins!")
 
-    with games_lock:
-        if room in games:
-            del games[room]
-            gc.collect()
+    stop_game(room_name)
+
+# --- COMMAND HANDLER ---
+
+def handle_command(bot, command, room_name, user, args, data):
+    cmd = command.lower().strip()
+    user_id = str(data.get("user_id", user))
+    
+    # 1. MASTER COMMANDS
+    if cmd == "tic":
+        if not args: return False
+        action = args[0]
+        
+        # STOP
+        if action == "0":
+            if stop_game(room_name):
+                bot.send_message(room_name, "🛑 Game stopped. Bets refunded.")
+            else:
+                bot.send_message(room_name, "⚠️ No active game to stop.")
+            return True
+            
+        # START
+        if action == "1":
+            if room_name in games:
+                bot.send_message(room_name, "⚠️ A game is already active here!")
+                return True
+                
+            # Init Game
+            games[room_name] = {
+                "status": "SELECT_MODE",
+                "creator": user_id,
+                "players": {"X": user_id, "O": None},
+                "names": {"X": user, "O": None},
+                "avatars": {"X": data.get("icon", ""), "O": ""},
+                "board": [" "] * 9,
+                "turn": "X",
+                "mode": None,
+                "bet": 0,
+                "timer_obj": None
+            }
+            reset_timer(bot, room_name, 90, "inactivity") # Global 90s timeout
+            
+            bot.send_message(room_name, "🎮 **Tic Tac Toe Started!**\nSelect Mode:\n`1` Single Player (vs Bot)\n`2` Multiplayer (vs Human)")
+            return True
+
+    # 2. GAME FLOW HANDLERS
+    if room_name not in games:
+        return False
+
+    game = games[room_name]
+    status = game['status']
+    
+    # --- MODE SELECTION ---
+    if status == "SELECT_MODE" and user_id == game['creator']:
+        if cmd == "1":
+            game['mode'] = "single"
+            game['players']['O'] = "BOT"
+            game['names']['O'] = "Robot 🤖"
+            game['status'] = "PLAYING"
+            game['bet'] = 0
+            
+            # Start Game
+            img = draw_neon_board(game)
+            url = utils.upload_image(img)
+            bot.send_image(room_name, url)
+            bot.send_message(room_name, f"🤖 Single Player Mode.\n@{user} (X) vs Bot (O)\nType `1-9` to move.")
+            reset_timer(bot, room_name, 30, "turn")
+            return True
+            
+        elif cmd == "2":
+            game['mode'] = "multi"
+            game['status'] = "SELECT_BET"
+            bot.send_message(room_name, "💰 **Multiplayer Mode**\nEnter bet amount (e.g. `100`) or type `0` for fun mode.")
+            reset_timer(bot, room_name, 90, "inactivity")
+            return True
+
+    # --- BET SELECTION ---
+    if status == "SELECT_BET" and user_id == game['creator']:
+        if cmd.isdigit():
+            amount = int(cmd)
+            # Validate Balance
+            bal = get_user_balance(user_id)
+            if amount > bal:
+                bot.send_message(room_name, f"❌ Insufficient funds! You have {bal} coins.")
+                return True
+            
+            game['bet'] = amount
+            game['status'] = "WAITING_JOIN"
+            
+            msg = "free fun" if amount == 0 else f"{amount} coins"
+            bot.send_message(room_name, f"Waiting for opponent... playing for **{msg}**.\nType `join` to accept challenge!")
+            reset_timer(bot, room_name, 90, "inactivity")
+            return True
+
+    # --- JOINING ---
+    if status == "WAITING_JOIN" and cmd == "join":
+        if user_id == game['creator']:
+            bot.send_message(room_name, "❌ You cannot play against yourself.")
+            return True
+            
+        # Check Balance for joiner
+        bet = game['bet']
+        if bet > 0:
+            bal = get_user_balance(user_id)
+            if bal < bet:
+                bot.send_message(room_name, f"❌ You need {bet} coins to join! (Balance: {bal})")
+                return True
+        
+        # Add Player
+        game['players']['O'] = user_id
+        game['names']['O'] = user
+        game['avatars']['O'] = data.get("icon", "")
+        game['status'] = "PLAYING"
+        
+        # Start
+        img = draw_neon_board(game)
+        url = utils.upload_image(img)
+        bot.send_image(room_name, url)
+        bot.send_message(room_name, f"⚔️ Match On! @{game['names']['X']} vs @{user}\nTurn: @{game['names']['X']} (X) - 30s")
+        reset_timer(bot, room_name, 30, "turn")
+        return True
+
+    # --- GAMEPLAY (MOVES) ---
+    if status == "PLAYING" and cmd.isdigit() and len(cmd) == 1:
+        # Check if it's correct player's turn
+        current_turn_sym = game['turn']
+        current_player_id = game['players'][current_turn_sym]
+        
+        if user_id != current_player_id:
+            return False # Ignore other people talking
+            
+        pos = int(cmd) - 1
+        if 0 <= pos <= 8 and game['board'][pos] == " ":
+            # VALID MOVE
+            game['board'][pos] = current_turn_sym
+            
+            # Check Result
+            res = check_win(game['board'])
+            if res:
+                end_game(bot, room_name, res, "Game Over")
+                return True
+            
+            # Swap Turn
+            next_sym = "O" if current_turn_sym == "X" else "X"
+            game['turn'] = next_sym
+            
+            # If Single Player -> BOT MOVE
+            if game['mode'] == "single" and next_sym == "O":
+                avail = [i for i, x in enumerate(game['board']) if x == " "]
+                if avail:
+                    bot_move = random.choice(avail)
+                    game['board'][bot_move] = "O"
+                    
+                    res_bot = check_win(game['board'])
+                    if res_bot:
+                        end_game(bot, room_name, res_bot, "Game Over")
+                        return True
+                    
+                    # Back to Player
+                    game['turn'] = "X"
+            
+            # Update Board Image
+            img = draw_neon_board(game)
+            url = utils.upload_image(img)
+            
+            next_name = game['names'][game['turn']]
+            bot.send_image(room_name, url)
+            bot.send_message(room_name, f"Turn: @{next_name} ({game['turn']}) - 30s")
+            
+            # Reset Turn Timer
+            reset_timer(bot, room_name, 30, "turn")
+            return True
+        else:
+            bot.send_message(room_name, "❌ Invalid move.")
+            return True
+
+    return False
