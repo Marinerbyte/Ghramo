@@ -2,13 +2,14 @@ import time
 import threading
 import random
 import gc
-import concurrent.futures 
+import queue  # <--- Queue System
 from PIL import Image, ImageDraw, ImageFont
 
+# Local imports
 import utils
 import db
 
-# --- CONFIG ---
+# --- CONFIGURATION ---
 NEON_GREEN = (57, 255, 20)
 NEON_PINK = (255, 16, 240)
 NEON_BLUE = (44, 255, 255)
@@ -16,14 +17,67 @@ BG_COLOR = (17, 24, 39)
 GRID_COLOR = (139, 92, 246)
 BOARD_SIZE = 500
 
-# Worker Pool: Reduced to 5 to prevent overload, but efficient enough
-image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+# ==========================================
+# 🚂 THE UPLOAD QUEUE (Single Line System)
+# ==========================================
+# Har game apni image yahan dalega.
+# Worker ek-ek karke upload karega taaki fail na ho.
+upload_queue = queue.Queue()
 
-# 🔒 SOCKET LOCK (Critical for Bot Stability)
-SOCKET_LOCK = threading.Lock()
+def upload_worker_loop(bot):
+    """
+    Ye function hamesha chalta rahega.
+    Ye queue se data nikal kar shanti se upload karega.
+    """
+    bot.log("✅ Upload Queue Worker Started")
+    
+    while True:
+        try:
+            # 1. Queue se task nikalo (Wait karega agar khali hai)
+            task = upload_queue.get()
+            
+            room_name = task['room']
+            image_obj = task['image']
+            text_msg = task['text']
+            is_fallback_needed = task['fallback']
+            game_obj = task['game_ref'] # Reference to calculate fallback text
+            
+            # 2. Upload Karo (Ab ye kabhi collide nahi karega)
+            url = utils.upload_image(image_obj)
+            
+            # 3. Bhejo
+            if url:
+                bot.send_image(room_name, url)
+                bot.send_message(room_name, text_msg)
+            else:
+                # Agar phir bhi fail hua, to Text Board bhejo
+                if is_fallback_needed and game_obj:
+                    # Fallback Text Generate
+                    b_str = "\n".join([" | ".join(game_obj.board[i:i+3]) for i in range(0, 9, 3)])
+                    bot.send_message(room_name, f"{text_msg}\n(Img Failed)\n`{b_str}`")
+                else:
+                    bot.send_message(room_name, text_msg)
+            
+            # Cleanup
+            del image_obj
+            gc.collect()
+            
+            # Batana ki kaam ho gaya
+            upload_queue.task_done()
+            
+        except Exception as e:
+            print(f"Queue Error: {e}")
+
+# ==========================================
+# MAIN SETUP
+# ==========================================
 
 def setup(bot):
-    bot.log("🎮 Tic Tac Toe (Session Pooled) Loaded")
+    bot.log("🎮 Tic Tac Toe (Queue System) Loaded")
+    
+    # Worker Thread Start Karo (Sirf Ek Baar)
+    t = threading.Thread(target=upload_worker_loop, args=(bot,), daemon=True)
+    t.start()
 
 def get_balance(user_id):
     try:
@@ -37,14 +91,14 @@ def get_balance(user_id):
     except: return 0
 
 # ==========================================
-# 📦 GAME CLASS
+# 📦 GAME CLASS (Object)
 # ==========================================
 class TicTacToeGame:
     def __init__(self, bot, room_name, creator_id, creator_name, icon):
         self.bot = bot
         self.room = room_name
         self.creator = creator_id
-        self.lock = threading.Lock() # Game Logic Lock
+        self.lock = threading.Lock()
         
         self.players = {"X": creator_id, "O": None}
         self.names = {"X": creator_name, "O": None}
@@ -75,48 +129,39 @@ class TicTacToeGame:
         self.timer.daemon = True
         self.timer.start()
 
-    # --- VISUALS ---
+    # --- SEND TO QUEUE (Ye turant return karega) ---
     def send_visuals(self, text_msg):
-        # Create full snapshot
-        snapshot = {
-            'board': self.board[:],
-            'turn': self.turn,
-            'names': self.names.copy()
+        # 1. Image Generate Karo (Ye fast hai)
+        # Hamein board ka copy chahiye taaki logic aage badh sake
+        board_copy = self.board[:] 
+        
+        # Is function ko thread me daal sakte hain agar image generation slow ho
+        # Par abhi ke liye direct call theek hai
+        img = self.draw_board(board_copy, self.turn)
+        
+        # 2. Queue me daal do (Manager sambhal lega)
+        task = {
+            'room': self.room,
+            'image': img,
+            'text': text_msg,
+            'fallback': True,
+            'game_ref': self
         }
-        image_executor.submit(self._bg_image_task, snapshot, text_msg, False, None)
+        upload_queue.put(task)
 
-    def _bg_image_task(self, snap, text, is_win, win_info):
-        # This runs in background thread
-        try:
-            img = None
-            if is_win:
-                img = self.draw_winner(win_info)
-            else:
-                img = self.draw_board(snap)
-            
-            # Upload using pooled session
-            url = utils.upload_image(img)
-            
-            # Send using Socket Lock
-            with SOCKET_LOCK:
-                if url:
-                    self.bot.send_image(self.room, url)
-                    self.bot.send_message(self.room, text)
-                else:
-                    # Fallback
-                    if not is_win:
-                        b_str = "\n".join([" | ".join(snap['board'][i:i+3]) for i in range(0, 9, 3)])
-                        self.bot.send_message(self.room, f"{text}\n(Img Failed)\n`{b_str}`")
-                    else:
-                        self.bot.send_message(self.room, text)
-        except Exception as e:
-            print(f"Err Room {self.room}: {e}")
-        finally:
-            if img: del img
-            gc.collect()
+    def send_win_card(self, text_msg, win_info):
+        img = self.draw_winner(win_info)
+        task = {
+            'room': self.room,
+            'image': img,
+            'text': text_msg,
+            'fallback': False,
+            'game_ref': None
+        }
+        upload_queue.put(task)
 
     # --- GRAPHICS ---
-    def draw_board(self, data):
+    def draw_board(self, board_data, current_turn):
         canvas = utils.create_canvas(BOARD_SIZE, BOARD_SIZE, color=BG_COLOR)
         draw = ImageDraw.Draw(canvas)
         w = 8
@@ -129,7 +174,7 @@ class TicTacToeGame:
         f_sm = utils.get_font("arial.ttf", 40)
         def gc(i): return (((i-1)%3)*166+83, ((i-1)//3)*166+83)
 
-        for i, m in enumerate(data['board']):
+        for i, m in enumerate(board_data):
             cx, cy = gc(i+1)
             if m == "X": draw.text((cx, cy), "X", font=f_lg, fill=NEON_PINK, anchor="mm", stroke_width=2)
             elif m == "O": draw.text((cx, cy), "O", font=f_lg, fill=NEON_GREEN, anchor="mm", stroke_width=2)
@@ -264,7 +309,7 @@ class TicTacToeGame:
                 db.add_game_result(l_uid, self.names[l_sym], "tic_tac_toe", -amt, is_win=False)
             
             info = {'name': self.names[winner_sym], 'av': self.avatars.get(winner_sym, ""), 'sym': winner_sym, 'amt': amt}
-            image_executor.submit(self._bg_image_task, None, f"🏆 **{reason}**! {self.names[winner_sym]} Wins!", True, info)
+            self.send_win_card(f"🏆 **{reason}**! {self.names[winner_sym]} Wins!", info)
 
         self.cleanup()
 
