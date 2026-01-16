@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 import utils
 import db
 
-# --- 🎨 VISUAL CONFIGURATION (Neon Cyberpunk Theme) ---
+# --- 🎨 VISUAL CONFIGURATION ---
 NEON_GREEN = (57, 255, 20)
 NEON_PINK = (255, 16, 240)
 NEON_BLUE = (44, 255, 255)
@@ -38,16 +38,12 @@ class TicTacToeGame:
         self.bot = bot
         self.room = room_name
         self.creator = creator_id
-        
-        # 🔒 LOCAL LOCK
         self.lock = threading.Lock()
         
-        # Player Data
         self.players = {"X": creator_id, "O": None}
         self.names = {"X": creator_name, "O": None}
         self.avatars = {"X": icon, "O": ""} 
         
-        # Game State
         self.board = [" "] * 9
         self.turn = "X"
         self.status = "MODE_SELECT" 
@@ -58,11 +54,9 @@ class TicTacToeGame:
         self.reset_timer(90, "inactivity")
         self.bot.send_message(self.room, "🎮 **Neon Tic Tac Toe**\nSelect Mode:\n`1` Single Player (vs Bot)\n`2` Multiplayer (PVP)")
 
-    # --- TIMER ---
     def timeout_handler(self, reason):
         with self.lock:
             if self.status == "ENDED": return
-
             if reason == "inactivity":
                 self.bot.send_message(self.room, "⚠️ **Game Cancelled!** (Inactivity). Bets refunded.")
                 self.cleanup()
@@ -95,7 +89,6 @@ class TicTacToeGame:
             else:
                 img = self.draw_board(snap)
             
-            # Upload
             url = utils.upload_image(img)
             
             if url:
@@ -129,12 +122,9 @@ class TicTacToeGame:
 
         for i, mark in enumerate(data['board']):
             cx, cy = get_pos(i+1)
-            if mark == "X":
-                draw.text((cx, cy), "X", font=f_lg, fill=NEON_PINK, anchor="mm", stroke_width=2)
-            elif mark == "O":
-                draw.text((cx, cy), "O", font=f_lg, fill=NEON_GREEN, anchor="mm", stroke_width=2)
-            else:
-                draw.text((cx, cy), str(i+1), font=f_sm, fill=(60, 60, 70), anchor="mm")
+            if mark == "X": draw.text((cx, cy), "X", font=f_lg, fill=NEON_PINK, anchor="mm", stroke_width=2)
+            elif mark == "O": draw.text((cx, cy), "O", font=f_lg, fill=NEON_GREEN, anchor="mm", stroke_width=2)
+            else: draw.text((cx, cy), str(i+1), font=f_sm, fill=(60, 60, 70), anchor="mm")
         return canvas
 
     def draw_winner_card(self, info):
@@ -143,10 +133,7 @@ class TicTacToeGame:
         utils.draw_gradient_bg(canvas, BG_COLOR, glow_color)
         draw = ImageDraw.Draw(canvas)
         cx, cy = BOARD_SIZE // 2, BOARD_SIZE // 2 - 50
-        
         border_col = NEON_PINK if info['sym'] == "X" else NEON_GREEN
-        
-        # Utils will handle download with headers
         utils.draw_circle_avatar(canvas, info['av'], cx-75, cy-75, 150, border_color=border_col, border_width=6)
         
         f_main = utils.get_font("arial.ttf", 45)
@@ -157,14 +144,13 @@ class TicTacToeGame:
         draw.text((cx, cy + 190), prize, font=f_sub, fill=NEON_BLUE, anchor="mm")
         return canvas
 
-    # --- GAME LOGIC ---
+    # --- LOGIC ---
     def process_input(self, cmd, user_id, user_name, icon):
         with self.lock:
-            # 1. MODE
+            # 1. MODE SELECT
             if self.status == "MODE_SELECT" and user_id == self.creator:
                 if cmd == "1":
-                    self.mode = "single"
-                    self.players['O'] = "BOT"; self.names['O'] = "Bot 🤖"
+                    self.mode = "single"; self.players['O'] = "BOT"; self.names['O'] = "Bot 🤖"
                     self.avatars['O'] = "https://robohash.org/talkinbot.png?set=set1"
                     self.status = "PLAYING"
                     self.send_visuals("🤖 Single Player Started!")
@@ -201,14 +187,16 @@ class TicTacToeGame:
 
             # 4. JOIN
             if self.status == "WAITING" and cmd == "join":
-                if user_id == self.creator: return True
+                # 🔥 Fix: Agar creator join kare to chup mat raho, batao use
+                if user_id == self.creator:
+                    self.bot.send_message(self.room, "❌ You cannot play against yourself!")
+                    return True
+                
                 if self.bet > 0 and get_balance(user_id) < self.bet:
                     self.bot.send_message(self.room, "❌ Low Balance!")
                     return True
                 
-                self.players['O'] = user_id
-                self.names['O'] = user_name
-                self.avatars['O'] = icon # JOINER KA ICON SAVE HUA
+                self.players['O'] = user_id; self.names['O'] = user_name; self.avatars['O'] = icon 
                 self.status = "PLAYING"
                 
                 self.send_visuals(f"⚔️ Match On! @{self.names['X']} vs @{user_name}")
@@ -274,7 +262,7 @@ class TicTacToeGame:
             
             info = {
                 'name': self.names[winner_sym], 
-                'av': self.avatars.get(winner_sym, ""), # Yahan ab URL sahi aayega
+                'av': self.avatars.get(winner_sym, ""), 
                 'sym': winner_sym, 
                 'amt': amt
             }
@@ -292,7 +280,7 @@ class TicTacToeGame:
         gc.collect()
 
 # ==========================================
-# 🌍 GLOBAL HANDLER
+# 🌍 GLOBAL REGISTRY
 # ==========================================
 active_games = {}
 
@@ -300,7 +288,7 @@ def handle_command(bot, command, room_name, user, args, data):
     cmd = command.lower().strip()
     uid = str(data.get("user_id", user))
     
-    # 🔥 FIXED: Check multiple keys for avatar URL
+    # 🔥 Fix: Check all possible keys for Avatar
     icon = data.get("avatar_url", data.get("icon", data.get("avatar", "")))
 
     if cmd == "tic":
@@ -309,14 +297,14 @@ def handle_command(bot, command, room_name, user, args, data):
         if args[0] == "0":
             if room_name in active_games:
                 active_games[room_name].cleanup()
-                bot.send_message(room_name, "🛑 Game stopped manually. Bets refunded.")
+                bot.send_message(room_name, "🛑 Game stopped manually.")
             else:
-                bot.send_message(room_name, "⚠️ No active game in this room.")
+                bot.send_message(room_name, "⚠️ No active game.")
             return True
 
         if args[0] == "1":
             if room_name in active_games:
-                bot.send_message(room_name, "⚠️ A game is already running here! Finish it first.")
+                bot.send_message(room_name, "⚠️ Game already running!")
                 return True
             
             new_game = TicTacToeGame(bot, room_name, uid, user, icon)
@@ -324,6 +312,10 @@ def handle_command(bot, command, room_name, user, args, data):
             return True
 
     if room_name in active_games:
+        # Debug Log: Agar join fail hua to console me dikhega
+        if cmd == "join":
+            bot.log(f"📝 Join Attempt in {room_name} by {user} (ID: {uid})")
+            
         return active_games[room_name].process_input(cmd, uid, user, icon)
 
     return False
