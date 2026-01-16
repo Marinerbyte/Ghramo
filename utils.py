@@ -6,7 +6,10 @@ import threading
 import time
 import gc
 import uuid
+import random
 import logging
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from PIL import Image, ImageDraw, ImageFont
 
 # --- CONFIGURATION ---
@@ -23,6 +26,18 @@ logging.basicConfig(level=logging.ERROR)
 def safe_print(msg):
     with print_lock:
         print(msg)
+
+# --- ADVANCED SESSION SETUP (Pooling) ---
+# Ye 'Pool' ek saath 20 uploads sambhal lega bina crash hue
+retry_strategy = Retry(
+    total=4,  # 4 baar try karega
+    backoff_factor=1,  # Har fail ke baad 1s, 2s, 4s rukega
+    status_forcelist=[429, 500, 502, 503, 504],
+)
+adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry_strategy)
+http = requests.Session()
+http.mount("https://", adapter)
+http.mount("http://", adapter)
 
 # --- FONT LOADER ---
 def get_font(font_name="arial.ttf", size=20):
@@ -52,7 +67,8 @@ def create_canvas(w, h, color=(0, 0, 0)):
 def draw_circle_avatar(canvas, url, x, y, size, border_color=(255, 255, 255), border_width=4):
     try:
         if not url or not url.startswith("http"): return
-        resp = requests.get(url, timeout=5, verify=False)
+        # Use Global Session for faster download
+        resp = http.get(url, timeout=5, verify=False)
         if resp.status_code != 200: return
         with io.BytesIO(resp.content) as buf:
             with Image.open(buf) as av_raw:
@@ -76,31 +92,35 @@ def draw_gradient_bg(canvas, start_color, end_color):
     mask.putdata(mask_data)
     canvas.paste(top, (0, 0), mask)
 
-# --- ROBUST UPLOADER (RETRY ADDED) ---
+# --- ROBUST UPLOADER (SESSION POOL + JITTER) ---
 def upload_image(image):
     url = None
     buf = None
-    # Retry 3 times if fails
-    for attempt in range(3):
-        try:
-            buf = io.BytesIO()
-            image.save(buf, format='PNG', optimize=True)
-            buf.seek(0)
-            unique_name = f'bot_{uuid.uuid4().hex}.png'
-            files = {'reqtype': (None, 'fileupload'), 'fileToUpload': (unique_name, buf, 'image/png')}
+    
+    # Random Delay to prevent collision (0.1s to 0.5s)
+    # Ye bohot zaroori hai taaki 2 rooms takraye nahi
+    time.sleep(random.uniform(0.1, 0.5))
+    
+    try:
+        buf = io.BytesIO()
+        image.save(buf, format='PNG', optimize=True)
+        buf.seek(0)
+        unique_name = f'bot_{uuid.uuid4().hex}.png'
+        files = {'reqtype': (None, 'fileupload'), 'fileToUpload': (unique_name, buf, 'image/png')}
+        
+        # Use Global Session (http.post instead of requests.post)
+        r = http.post('https://catbox.moe/user/api.php', files=files, timeout=30, verify=False)
+        
+        if r.status_code == 200 and "http" in r.text:
+            url = r.text.strip()
+            # safe_print(f"✅ Upload: {unique_name}")
+        else:
+            safe_print(f"❌ Upload Fail Code: {r.status_code}")
             
-            # Timeout badhaya
-            r = requests.post('https://catbox.moe/user/api.php', files=files, timeout=25, verify=False)
-            
-            if r.status_code == 200 and "http" in r.text:
-                url = r.text.strip()
-                break # Success, loop todo
-            else:
-                time.sleep(1) # Wait 1s before retry
-        except Exception as e:
-            safe_print(f"Upload Err: {e}")
-            time.sleep(1)
-        finally:
-            if buf: buf.close()
+    except Exception as e:
+        safe_print(f"❌ Upload Err: {e}")
+    finally:
+        if buf: buf.close()
+        # gc.collect() # Don't over-collect, let Python manage
             
     return url
