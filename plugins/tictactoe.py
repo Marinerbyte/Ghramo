@@ -2,14 +2,13 @@ import time
 import threading
 import random
 import gc
-import queue  # <--- Queue System
 from PIL import Image, ImageDraw, ImageFont
 
-# Local imports
+# Local imports (Aapke project structure ke hisab se)
 import utils
 import db
 
-# --- CONFIGURATION ---
+# --- 🎨 VISUAL CONFIGURATION (Neon Cyberpunk Theme) ---
 NEON_GREEN = (57, 255, 20)
 NEON_PINK = (255, 16, 240)
 NEON_BLUE = (44, 255, 255)
@@ -18,68 +17,10 @@ GRID_COLOR = (139, 92, 246)
 BOARD_SIZE = 500
 
 # ==========================================
-# 🚂 THE UPLOAD QUEUE (Single Line System)
+# 🛠️ DATABASE WRAPPER (Score Handling)
 # ==========================================
-# Har game apni image yahan dalega.
-# Worker ek-ek karke upload karega taaki fail na ho.
-upload_queue = queue.Queue()
-
-def upload_worker_loop(bot):
-    """
-    Ye function hamesha chalta rahega.
-    Ye queue se data nikal kar shanti se upload karega.
-    """
-    bot.log("✅ Upload Queue Worker Started")
-    
-    while True:
-        try:
-            # 1. Queue se task nikalo (Wait karega agar khali hai)
-            task = upload_queue.get()
-            
-            room_name = task['room']
-            image_obj = task['image']
-            text_msg = task['text']
-            is_fallback_needed = task['fallback']
-            game_obj = task['game_ref'] # Reference to calculate fallback text
-            
-            # 2. Upload Karo (Ab ye kabhi collide nahi karega)
-            url = utils.upload_image(image_obj)
-            
-            # 3. Bhejo
-            if url:
-                bot.send_image(room_name, url)
-                bot.send_message(room_name, text_msg)
-            else:
-                # Agar phir bhi fail hua, to Text Board bhejo
-                if is_fallback_needed and game_obj:
-                    # Fallback Text Generate
-                    b_str = "\n".join([" | ".join(game_obj.board[i:i+3]) for i in range(0, 9, 3)])
-                    bot.send_message(room_name, f"{text_msg}\n(Img Failed)\n`{b_str}`")
-                else:
-                    bot.send_message(room_name, text_msg)
-            
-            # Cleanup
-            del image_obj
-            gc.collect()
-            
-            # Batana ki kaam ho gaya
-            upload_queue.task_done()
-            
-        except Exception as e:
-            print(f"Queue Error: {e}")
-
-# ==========================================
-# MAIN SETUP
-# ==========================================
-
-def setup(bot):
-    bot.log("🎮 Tic Tac Toe (Queue System) Loaded")
-    
-    # Worker Thread Start Karo (Sirf Ek Baar)
-    t = threading.Thread(target=upload_worker_loop, args=(bot,), daemon=True)
-    t.start()
-
 def get_balance(user_id):
+    """User ka current global score check karta hai"""
     try:
         conn = db.get_connection()
         cur = conn.cursor()
@@ -91,80 +32,115 @@ def get_balance(user_id):
     except: return 0
 
 # ==========================================
-# 📦 GAME CLASS (Object)
+# 📦 GAME INSTANCE (The "Dabba")
+# Har Room ke liye ye ek alag copy banti hai.
 # ==========================================
 class TicTacToeGame:
     def __init__(self, bot, room_name, creator_id, creator_name, icon):
         self.bot = bot
         self.room = room_name
         self.creator = creator_id
+        
+        # 🔒 LOCAL LOCK: Sirf is room ke liye.
+        # Ye ensure karta hai ki ek time pe ek hi move process ho.
         self.lock = threading.Lock()
         
+        # Player Data
         self.players = {"X": creator_id, "O": None}
         self.names = {"X": creator_name, "O": None}
-        self.avatars = {"X": icon, "O": ""} 
+        self.avatars = {"X": icon, "O": ""} # Avatar URL store karenge winner card ke liye
+        
+        # Game State
         self.board = [" "] * 9
         self.turn = "X"
-        self.status = "MODE_SELECT" 
-        self.mode = None
+        self.status = "MODE_SELECT" # Workflow handle karne ke liye status
+        self.mode = None    # 'single' or 'multi'
         self.bet = 0
         self.timer = None
         
+        # Start hote hi notification
         self.reset_timer(90, "inactivity")
-        self.bot.send_message(self.room, "🎮 **Tic Tac Toe**\n`1` Single Player\n`2` Multiplayer")
+        self.bot.send_message(self.room, "🎮 **Neon Tic Tac Toe**\nSelect Mode:\n`1` Single Player (vs Bot)\n`2` Multiplayer (PVP)")
 
-    def timeout_task(self, reason):
+    # ---------------------------------------------------
+    # ⏳ TIMER SYSTEM (Robust & Thread Safe)
+    # ---------------------------------------------------
+    def timeout_handler(self, reason):
+        # Lock lagana zaroori hai taaki cleanup ke beech me koi move na chale
         with self.lock:
             if self.status == "ENDED": return
+
             if reason == "inactivity":
-                self.bot.send_message(self.room, "⚠️ **Stopped (Inactivity).** Refunded.")
+                self.bot.send_message(self.room, "⚠️ **Game Cancelled!** (90s Inactivity). All bets refunded.")
                 self.cleanup()
             elif reason == "turn":
-                winner = "O" if self.turn == "X" else "X"
-                self.end_game(winner, "Time Out Victory")
+                # 30s Turn Missed -> Opponent Wins
+                winner_sym = "O" if self.turn == "X" else "X"
+                self.end_game(winner_sym, "Time Out Victory")
 
     def reset_timer(self, seconds, reason):
+        """Purana timer kill karke naya start karta hai"""
         if self.timer: self.timer.cancel()
-        self.timer = threading.Timer(seconds, self.timeout_task, [reason])
-        self.timer.daemon = True
+        self.timer = threading.Timer(seconds, self.timeout_handler, [reason])
+        self.timer.daemon = True # Main thread band hone par ye bhi band hoga
         self.timer.start()
 
-    # --- SEND TO QUEUE (Ye turant return karega) ---
+    # ---------------------------------------------------
+    # 🖼️ VISUAL SYSTEM (Background Threading)
+    # ---------------------------------------------------
     def send_visuals(self, text_msg):
-        # 1. Image Generate Karo (Ye fast hai)
-        # Hamein board ka copy chahiye taaki logic aage badh sake
-        board_copy = self.board[:] 
-        
-        # Is function ko thread me daal sakte hain agar image generation slow ho
-        # Par abhi ke liye direct call theek hai
-        img = self.draw_board(board_copy, self.turn)
-        
-        # 2. Queue me daal do (Manager sambhal lega)
-        task = {
-            'room': self.room,
-            'image': img,
-            'text': text_msg,
-            'fallback': True,
-            'game_ref': self
+        """
+        Game ko roke bina image generate aur send karta hai.
+        Snapshot technique use hoti hai taaki race condition na ho.
+        """
+        snapshot = {
+            'board': self.board[:], # Copy list
+            'turn': self.turn,
+            'names': self.names.copy()
         }
-        upload_queue.put(task)
+        # Naye Thread mein daal do (Fire & Forget)
+        t = threading.Thread(target=self._bg_image_task, args=(snapshot, text_msg, False, None))
+        t.daemon = True
+        t.start()
 
-    def send_win_card(self, text_msg, win_info):
-        img = self.draw_winner(win_info)
-        task = {
-            'room': self.room,
-            'image': img,
-            'text': text_msg,
-            'fallback': False,
-            'game_ref': None
-        }
-        upload_queue.put(task)
+    def _bg_image_task(self, snap, text, is_win, win_info):
+        """Ye function background mein chalta hai."""
+        try:
+            img = None
+            if is_win:
+                img = self.draw_winner_card(win_info)
+            else:
+                img = self.draw_board(snap)
+            
+            # Upload (Utils.py wala naya connection use karega)
+            url = utils.upload_image(img)
+            
+            if url:
+                self.bot.send_image(self.room, url)
+                self.bot.send_message(self.room, text)
+            else:
+                # Fallback agar upload fail ho jaye (Game rukna nahi chahiye)
+                if not is_win:
+                    board_str = "\n".join([" | ".join(snap['board'][i:i+3]) for i in range(0, 9, 3)])
+                    self.bot.send_message(self.room, f"{text}\n(Image Error)\n`{board_str}`")
+                else:
+                    self.bot.send_message(self.room, text)
+        except Exception as e:
+            print(f"[{self.room}] Visual Error: {e}")
+        finally:
+            # 🧹 KACHRA SAAF: Image memory se delete karo
+            if img: del img
+            gc.collect()
 
-    # --- GRAPHICS ---
-    def draw_board(self, board_data, current_turn):
+    # ---------------------------------------------------
+    # 🎨 GRAPHICS ENGINE (The "Zabardast" Part)
+    # ---------------------------------------------------
+    def draw_board(self, data):
         canvas = utils.create_canvas(BOARD_SIZE, BOARD_SIZE, color=BG_COLOR)
         draw = ImageDraw.Draw(canvas)
         w = 8
+        
+        # Glowing Grid
         draw.line([(166, 20), (166, 480)], fill=GRID_COLOR, width=w)
         draw.line([(332, 20), (332, 480)], fill=GRID_COLOR, width=w)
         draw.line([(20, 166), (480, 166)], fill=GRID_COLOR, width=w)
@@ -172,118 +148,154 @@ class TicTacToeGame:
         
         f_lg = utils.get_font("arial.ttf", 100)
         f_sm = utils.get_font("arial.ttf", 40)
-        def gc(i): return (((i-1)%3)*166+83, ((i-1)//3)*166+83)
-
-        for i, m in enumerate(board_data):
-            cx, cy = gc(i+1)
-            if m == "X": draw.text((cx, cy), "X", font=f_lg, fill=NEON_PINK, anchor="mm", stroke_width=2)
-            elif m == "O": draw.text((cx, cy), "O", font=f_lg, fill=NEON_GREEN, anchor="mm", stroke_width=2)
-            else: draw.text((cx, cy), str(i+1), font=f_sm, fill=(60, 60, 70), anchor="mm")
-        return canvas
-
-    def draw_winner(self, info):
-        canvas = utils.create_canvas(BOARD_SIZE, BOARD_SIZE, color=BG_COLOR)
-        glow = (60, 0, 60) if info['sym'] == "X" else (0, 60, 0)
-        utils.draw_gradient_bg(canvas, BG_COLOR, glow)
-        draw = ImageDraw.Draw(canvas)
-        cx, cy = BOARD_SIZE//2, BOARD_SIZE//2 - 50
-        border = NEON_PINK if info['sym'] == "X" else NEON_GREEN
-        utils.draw_circle_avatar(canvas, info['av'], cx-75, cy-75, 150, border_color=border, border_width=6)
         
-        f_m = utils.get_font("arial.ttf", 45)
-        f_s = utils.get_font("arial.ttf", 25)
-        draw.text((cx, cy+100), "🏆 WINNER 🏆", font=f_s, fill=(200,200,200), anchor="mm")
-        draw.text((cx, cy+145), info['name'], font=f_m, fill="white", anchor="mm")
-        prize = f"💰 +{info['amt']} Coins" if info['amt'] > 0 else "👑 Victory!"
-        draw.text((cx, cy+190), prize, font=f_s, fill=NEON_BLUE, anchor="mm")
+        def get_pos(i): return (((i-1)%3)*166+83, ((i-1)//3)*166+83)
+
+        for i, mark in enumerate(data['board']):
+            cx, cy = get_pos(i+1)
+            if mark == "X":
+                draw.text((cx, cy), "X", font=f_lg, fill=NEON_PINK, anchor="mm", stroke_width=2)
+            elif mark == "O":
+                draw.text((cx, cy), "O", font=f_lg, fill=NEON_GREEN, anchor="mm", stroke_width=2)
+            else:
+                draw.text((cx, cy), str(i+1), font=f_sm, fill=(60, 60, 70), anchor="mm")
         return canvas
 
-    # --- LOGIC ---
+    def draw_winner_card(self, info):
+        # 1. Base Canvas
+        canvas = utils.create_canvas(BOARD_SIZE, BOARD_SIZE, color=BG_COLOR)
+        
+        # 2. Gradient Glow (Winner ke color ka)
+        glow_color = (60, 0, 60) if info['sym'] == "X" else (0, 60, 0)
+        utils.draw_gradient_bg(canvas, BG_COLOR, glow_color)
+        
+        draw = ImageDraw.Draw(canvas)
+        cx, cy = BOARD_SIZE // 2, BOARD_SIZE // 2 - 50
+        
+        # 3. AVATAR (Circle + Neon Border)
+        border_col = NEON_PINK if info['sym'] == "X" else NEON_GREEN
+        # Utils wala robust function use karenge
+        utils.draw_circle_avatar(canvas, info['av'], cx-75, cy-75, 150, border_color=border_col, border_width=6)
+        
+        # 4. Text Details
+        f_main = utils.get_font("arial.ttf", 45)
+        f_sub = utils.get_font("arial.ttf", 25)
+        
+        draw.text((cx, cy + 100), "🏆 WINNER 🏆", font=f_sub, fill=(200, 200, 200), anchor="mm")
+        draw.text((cx, cy + 145), info['name'], font=f_main, fill="white", anchor="mm")
+        
+        prize = f"💰 +{info['amt']} Coins" if info['amt'] > 0 else "👑 Victory!"
+        draw.text((cx, cy + 190), prize, font=f_sub, fill=NEON_BLUE, anchor="mm")
+        
+        return canvas
+
+    # ---------------------------------------------------
+    # 🧠 GAME LOGIC (The Brain)
+    # ---------------------------------------------------
     def process_input(self, cmd, user_id, user_name, icon):
+        # 🔒 CRITICAL SECTION: Race Condition Killer
         with self.lock:
-            # 1. MODE
+            
+            # --- PHASE 1: MODE SELECT ---
             if self.status == "MODE_SELECT" and user_id == self.creator:
                 if cmd == "1":
+                    # Single Player
                     self.mode = "single"
                     self.players['O'] = "BOT"; self.names['O'] = "Bot 🤖"
-                    self.avatars['O'] = "https://robohash.org/talkinbot.png?set=set1"
+                    self.avatars['O'] = "https://robohash.org/talkinbot.png?set=set1" # Bot Avatar
                     self.status = "PLAYING"
                     self.send_visuals("🤖 Single Player Started!")
                     self.reset_timer(30, "turn")
                 elif cmd == "2":
+                    # Multiplayer
                     self.mode = "multi"; self.status = "BET_TYPE"
-                    self.bot.send_message(self.room, "⚖️ **Multiplayer**\n`1` With Bet\n`2` No Bet")
+                    self.bot.send_message(self.room, "⚖️ **Multiplayer Options**\n`1` With Bet\n`2` Without Bet")
                     self.reset_timer(90, "inactivity")
                 return True
 
-            # 2. BET TYPE
+            # --- PHASE 2: BET OPTIONS ---
             if self.status == "BET_TYPE" and user_id == self.creator:
                 if cmd == "1":
                     self.status = "BET_AMT"
-                    self.bot.send_message(self.room, "💰 Enter Amount:")
+                    self.bot.send_message(self.room, "💰 Enter Bet Amount:")
                 elif cmd == "2":
                     self.bet = 0; self.status = "WAITING"
-                    self.bot.send_message(self.room, "⚔️ Fun Mode! Type `join`.")
+                    self.bot.send_message(self.room, "⚔️ Fun Mode! Waiting for opponent... Type `join`.")
                 self.reset_timer(90, "inactivity")
                 return True
 
-            # 3. BET AMT
+            # --- PHASE 3: BET AMOUNT ---
             if self.status == "BET_AMT" and user_id == self.creator and cmd.isdigit():
                 amt = int(cmd)
                 if amt <= 0: return True
+                
                 bal = get_balance(user_id)
                 if amt > bal:
-                    self.bot.send_message(self.room, f"❌ Low Balance: {bal}")
+                    self.bot.send_message(self.room, f"❌ Insufficient Balance! (You have {bal})")
                     return True
+                
                 self.bet = amt; self.status = "WAITING"
-                self.bot.send_message(self.room, f"⚔️ Bet: {amt}. Type `join`.")
+                self.bot.send_message(self.room, f"⚔️ Bet: {amt}. Waiting for opponent... Type `join`.")
                 self.reset_timer(90, "inactivity")
                 return True
 
-            # 4. JOIN
+            # --- PHASE 4: JOINING ---
             if self.status == "WAITING" and cmd == "join":
-                if user_id == self.creator: return True
+                if user_id == self.creator: return True # Khud se nahi khel sakta
+                
+                # Joiner Balance Check
                 if self.bet > 0 and get_balance(user_id) < self.bet:
                     self.bot.send_message(self.room, "❌ Low Balance!")
                     return True
-                self.players['O'] = user_id; self.names['O'] = user_name; self.avatars['O'] = icon 
+                
+                self.players['O'] = user_id
+                self.names['O'] = user_name
+                self.avatars['O'] = icon # Joiner ka Avatar Save
                 self.status = "PLAYING"
+                
                 self.send_visuals(f"⚔️ Match On! @{self.names['X']} vs @{user_name}")
                 self.reset_timer(30, "turn")
                 return True
 
-            # 5. PLAY
+            # --- PHASE 5: GAMEPLAY ---
             if self.status == "PLAYING" and cmd.isdigit():
-                curr = self.players[self.turn]
-                if user_id != curr: return False
+                current_player_id = self.players[self.turn]
+                if user_id != current_player_id: return False # Not your turn
                 
-                p = int(cmd) - 1
-                if 0 <= p <= 8 and self.board[p] == " ":
-                    self.board[p] = self.turn
+                pos = int(cmd) - 1
+                if 0 <= pos <= 8 and self.board[pos] == " ":
+                    # VALID MOVE
+                    self.board[pos] = self.turn
                     
-                    win = self.check_win()
-                    if win:
-                        self.end_game(win, "Won")
+                    # 1. Check Win
+                    winner = self.check_win()
+                    if winner:
+                        self.end_game(winner, "Won")
                         return True
                     
+                    # 2. Swap Turn
                     self.turn = "O" if self.turn == "X" else "X"
                     
+                    # 3. Bot Turn (Agar Single Player Hai)
                     if self.mode == "single" and self.turn == "O":
-                        av = [i for i,x in enumerate(self.board) if x==" "]
-                        if av:
-                            self.board[random.choice(av)] = "O"
+                        avail = [i for i, x in enumerate(self.board) if x == " "]
+                        if avail:
+                            self.board[random.choice(avail)] = "O"
+                            # Check Bot Win
                             if self.check_win():
                                 self.end_game(self.check_win(), "Bot Won")
                                 return True
                             self.turn = "X"
 
+                    # 4. Next Turn Visuals
                     self.send_visuals(f"Turn: @{self.names[self.turn]}")
                     self.reset_timer(30, "turn")
                     return True
                 else:
-                    self.bot.send_message(self.room, "❌ Invalid!")
+                    self.bot.send_message(self.room, "❌ Invalid Move!")
                     return True
-            return False
+
+        return False
 
     def check_win(self):
         w = [(0,1,2), (3,4,5), (6,7,8), (0,3,6), (1,4,7), (2,5,8), (0,4,8), (2,4,6)]
@@ -294,58 +306,89 @@ class TicTacToeGame:
 
     def end_game(self, winner_sym, reason):
         if winner_sym == "Draw":
-            self.bot.send_message(self.room, "🤝 **Draw!**")
+            self.bot.send_message(self.room, "🤝 **It's a Draw!** No coins exchanged.")
         else:
             w_uid = self.players[winner_sym]
             l_sym = "O" if winner_sym == "X" else "X"
             l_uid = self.players[l_sym]
             amt = self.bet
             
+            # DB Updates (Global Score + Game Score handled by DB)
             if self.mode == "single":
                 amt = 500
                 db.add_game_result(w_uid, self.names[winner_sym], "tic_tac_toe", amt, is_win=True)
             elif self.mode == "multi" and amt > 0:
+                # Winner
                 db.add_game_result(w_uid, self.names[winner_sym], "tic_tac_toe", amt, is_win=True)
+                # Loser
                 db.add_game_result(l_uid, self.names[l_sym], "tic_tac_toe", -amt, is_win=False)
             
-            info = {'name': self.names[winner_sym], 'av': self.avatars.get(winner_sym, ""), 'sym': winner_sym, 'amt': amt}
-            self.send_win_card(f"🏆 **{reason}**! {self.names[winner_sym]} Wins!", info)
+            # Winner Card Info
+            info = {
+                'name': self.names[winner_sym], 
+                'av': self.avatars.get(winner_sym, ""), 
+                'sym': winner_sym, 
+                'amt': amt
+            }
+            
+            # Send Card in Background
+            t = threading.Thread(target=self._bg_image_task, args=(None, f"🏆 **{reason}**! {self.names[winner_sym]} Wins!", True, info))
+            t.daemon = True
+            t.start()
 
         self.cleanup()
 
     def cleanup(self):
+        """Safely clean everything to prevent memory leaks"""
         self.status = "ENDED"
         if self.timer: self.timer.cancel()
-        if self.room in active_games: del active_games[self.room]
+        
+        # Global dict se hatao
+        if self.room in active_games:
+            del active_games[self.room]
+        
+        # Force Memory Clean
         gc.collect()
 
 # ==========================================
-# 🌍 GLOBAL HANDLER
+# 🌍 GLOBAL REGISTRY (Active Games Map)
 # ==========================================
 active_games = {}
 
 def handle_command(bot, command, room_name, user, args, data):
     cmd = command.lower().strip()
     uid = str(data.get("user_id", user))
+    
+    # Avatar URL Grabber
     icon = data.get("icon", data.get("avatar", ""))
 
+    # 1. MASTER COMMAND: !tic
     if cmd == "tic":
         if not args: return False
+        
+        # STOP GAME
         if args[0] == "0":
             if room_name in active_games:
                 active_games[room_name].cleanup()
-                bot.send_message(room_name, "🛑 Stopped.")
-            else: bot.send_message(room_name, "⚠️ No game.")
+                bot.send_message(room_name, "🛑 Game stopped manually. Bets refunded.")
+            else:
+                bot.send_message(room_name, "⚠️ No active game in this room.")
             return True
 
+        # START GAME
         if args[0] == "1":
             if room_name in active_games:
-                bot.send_message(room_name, "⚠️ Game running!")
+                bot.send_message(room_name, "⚠️ A game is already running here! Finish it first.")
                 return True
-            active_games[room_name] = TicTacToeGame(bot, room_name, uid, user, icon)
+            
+            # Create NEW Isolated Game Instance
+            new_game = TicTacToeGame(bot, room_name, uid, user, icon)
+            active_games[room_name] = new_game
             return True
 
+    # 2. ROUTE INPUT TO CORRECT ROOM
     if room_name in active_games:
+        # Us room ka object dhoondo aur input process karo
         return active_games[room_name].process_input(cmd, uid, user, icon)
 
     return False
