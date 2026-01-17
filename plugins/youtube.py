@@ -1,29 +1,30 @@
 import threading
 import requests
 import json
-from PIL import Image
+import time
 
 # Local imports
 import utils
 
 # --- CONFIGURATION ---
-# 🔴 Aapka Naya Audio Server URL (Yahan set kar diya hai)
-API_URL = "https://mp3-qj9e.onrender.com/convert"
+# 👇 Tera Naya Audio Server URL (JioSaavn wala)
+API_URL = "https://mp3-2mgp.onrender.com/convert"
 
 def setup(bot):
-    bot.log("🎧 YouTube Plugin (Remote Worker) Loaded")
+    bot.log("🎵 Music Plugin (Connected to mp3-2mgp) Loaded")
 
-def process_remote_task(bot, room_name, query, user):
+def music_task(bot, room_name, query, user):
     try:
-        # User ko batao kaam shuru hai
-        bot.send_message(room_name, f"🔎 **Searching & Processing:** `{query}`...\n(Please wait, downloading...)")
+        # 1. User ko batao hum dhoond rahe hain
+        bot.send_message(room_name, f"🔎 **Searching:** `{query}`...\n(Fetching from High Speed Server...)")
 
-        # 1. API Call to Your New Worker Server
+        # 2. Server ko request bhejo
         payload = {"query": query}
         
-        # Timeout 120s rakha hai kyunki download/upload mein time lagta hai
-        resp = requests.post(API_URL, json=payload, timeout=120)
+        # Timeout 60s kaafi hai kyunki JioSaavn fast hai
+        resp = requests.post(API_URL, json=payload, timeout=60)
         
+        # 3. Error Checking
         if resp.status_code != 200:
             bot.send_message(room_name, f"❌ Server Error: {resp.status_code}")
             return
@@ -35,25 +36,28 @@ def process_remote_task(bot, room_name, query, user):
             bot.send_message(room_name, f"❌ Failed: {error_msg}")
             return
 
-        # 2. Data aa gaya (URL of Audio & Image)
+        # 4. Data Extract Karo
         title = data.get('title', 'Unknown Track')
         audio_url = data.get('audio_url')
         card_url = data.get('card_url')
-        
-        # 3. Send Music Card (Image)
+        duration = data.get('duration', 'N/A')
+
+        # 5. Image (Card) Bhejo
         if card_url:
             bot.send_image(room_name, card_url)
+            # Thoda sa delay taaki image pehle load ho jaye
+            time.sleep(0.5)
         
-        # 4. Send Audio File
+        # 6. Audio Bhejo
         if audio_url:
-            bot.send_message(room_name, f"💿 **Playing:** {title}\n👤 **Req by:** @{user}")
+            bot.send_message(room_name, f"💿 **Playing:** {title}\n⏱ **Duration:** {duration}\n👤 **Req by:** @{user}")
             bot.send_audio(room_name, audio_url)
         else:
-            bot.send_message(room_name, "❌ Server finished but returned no audio URL.")
+            bot.send_message(room_name, "❌ Audio URL nahi mila server se.")
 
     except Exception as e:
-        print(f"Remote Plugin Error: {e}")
-        bot.send_message(room_name, "⚠️ Timeout or Connection Error with Audio Server.")
+        print(f"Music Plugin Error: {e}")
+        bot.send_message(room_name, "⚠️ Connection Timeout or Server Error.")
 
 def handle_command(bot, command, room_name, user, args, data):
     cmd = command.lower().strip()
@@ -65,10 +69,11 @@ def handle_command(bot, command, room_name, user, args, data):
             
         query = " ".join(args)
         
-        # Thread start karo taaki main bot block na ho
-        t = threading.Thread(target=process_remote_task, args=(bot, room_name, query, user))
+        # Thread start karo (Background me chalega)
+        t = threading.Thread(target=music_task, args=(bot, room_name, query, user))
         t.daemon = True
         t.start()
         
         return True
+
     return False
