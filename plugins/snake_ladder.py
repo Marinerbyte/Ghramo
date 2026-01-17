@@ -24,7 +24,7 @@ SNAKES = {38: 20, 45: 7, 51: 10, 76: 54, 91: 73, 97: 61}
 sl_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 
 def setup(bot):
-    bot.log("🐍 Snake & Ladders Loaded")
+    bot.log("🐍 Snake & Ladders (High-Speed) Loaded")
     threading.Thread(target=fetch_board, daemon=True).start()
 
 def fetch_board():
@@ -47,21 +47,36 @@ def get_balance(uid):
         return row[0] if row else 0
     except: return 0
 
+# --- FAST UPLOADER HELPER ---
+def upload_fast_jpeg(image):
+    """PNG ki jagah Optimized JPEG upload karta hai taaki turant dikhe"""
+    url = None
+    try:
+        buf = io.BytesIO()
+        # Quality 70 aur Progressive ON karne se image turant load hoti hai
+        image.convert("RGB").save(buf, format='JPEG', quality=70, optimize=True, progressive=True)
+        buf.seek(0)
+        
+        import uuid
+        unique_name = f'sl_{uuid.uuid4().hex}.jpg'
+        files = {'reqtype': (None, 'fileupload'), 'fileToUpload': (unique_name, buf, 'image/jpeg')}
+        
+        r = requests.post('https://catbox.moe/user/api.php', files=files, headers={'Connection': 'close'}, timeout=30)
+        if r.status_code == 200:
+            url = r.text.strip()
+        buf.close()
+    except: pass
+    return url
+
 class SnakeLadderGame:
     def __init__(self, bot, room, creator_id, creator_name, icon):
-        self.bot = bot
-        self.room = room
-        self.creator = creator_id
+        self.bot, self.room, self.creator = bot, room, creator_id
         self.lock = threading.Lock()
         self.players = {"P1": creator_id, "P2": None}
         self.names = {"P1": creator_name, "P2": None}
         self.avatars = {"P1": icon, "P2": ""}
         self.pos = {"P1": 1, "P2": 1}
-        self.turn = "P1"
-        self.status = "MODE_SELECT"
-        self.mode = None 
-        self.bet = 0
-        self.timer = None
+        self.turn, self.status, self.mode, self.bet, self.timer = "P1", "MODE_SELECT", None, 0, None
         self.reset_timer(120, "inactivity")
         self.bot.send_message(self.room, "🐍 **Snake & Ladders**\n`1` Single Player\n`2` Multiplayer")
 
@@ -81,7 +96,8 @@ class SnakeLadderGame:
     def _bg_task(self, snap, text, is_win, info):
         try:
             img = self.draw_winner(info) if is_win else self.draw_board(snap)
-            url = utils.upload_image(img)
+            # Yahan humne naya Fast JPEG Uploader use kiya hai
+            url = upload_fast_jpeg(img)
             if url:
                 self.bot.send_image(self.room, url)
                 self.bot.send_message(self.room, text)
@@ -100,7 +116,7 @@ class SnakeLadderGame:
 
     def draw_winner(self, info):
         canvas = utils.create_canvas(400, 400, (17,24,39))
-        utils.draw_gradient_bg(canvas, (17,24,39), (20,80,20))
+        utils.draw_gradient_bg(canvas, (17,24,39), (20, 80, 20))
         draw = ImageDraw.Draw(canvas)
         utils.draw_circle_avatar(canvas, info['av'], 125, 50, 150, (255,215,0), 5)
         f_m, f_s = utils.get_font("arial.ttf", 35), utils.get_font("arial.ttf", 20)
@@ -115,7 +131,7 @@ class SnakeLadderGame:
                 if cmd == "1":
                     self.mode, self.players['P2'], self.names['P2'], self.status = "single", "BOT", "Bot 🤖", "PLAYING"
                     self.avatars['P2'] = "https://robohash.org/bot"
-                    self.send_game_update("🎮 **Match Started!** Type `roll` to play.")
+                    self.send_game_update("🎮 **Match Started!** Type `roll`.")
                     self.reset_timer(120, "turn")
                 elif cmd == "2":
                     self.mode, self.status = "multi", "BET_TYPE"
@@ -131,7 +147,7 @@ class SnakeLadderGame:
                 amt = int(cmd)
                 if amt > get_balance(uid): self.bot.send_message(self.room, "❌ Low Balance!"); return True
                 self.bet, self.status = amt, "WAITING"
-                self.bot.send_message(self.room, f"⚔️ Betting {amt}. Type `join` to play.")
+                self.bot.send_message(self.room, f"⚔️ Betting {amt}. Type `join`.")
                 return True
 
             if self.status == "WAITING" and cmd == "join":
@@ -148,7 +164,7 @@ class SnakeLadderGame:
                 old = self.pos[self.turn]
                 new = old + dice
                 msg = f"🎲 @{self.names[self.turn]} rolled {dice}."
-                if new > 100: new = old; msg += " (Wait for exact 100)"
+                if new > 100: new = old; msg += " (Need exact 100)"
                 else:
                     if new in LADDERS: new = LADDERS[new]; msg += " 🪜 Ladder!"
                     elif new in SNAKES: new = SNAKES[new]; msg += " 🐍 Snake!"
@@ -203,7 +219,8 @@ def handle_command(bot, command, room_name, user, args, data):
     icon = data.get("avatar_url", data.get("icon", ""))
     if cmd == "sl":
         if args and args[0] == "1":
-            if room_name not in active_sl: active_sl[room_name] = SnakeLadderGame(bot, room_name, uid, user, icon)
+            if room_name in active_sl: return True
+            active_sl[room_name] = SnakeLadderGame(bot, room_name, uid, user, icon)
             return True
         if args and args[0] == "0":
             if room_name in active_sl: active_sl[room_name].cleanup(); bot.send_message(room_name, "🛑 Stopped.")
