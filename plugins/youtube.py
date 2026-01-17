@@ -2,19 +2,18 @@ import threading
 import requests
 
 # --- CONFIGURATION ---
-# Tera wahi naya server URL
 API_URL = "https://mp3-2mgp.onrender.com/convert"
 
 def setup(bot):
-    bot.log("🎵 Fast Music Plugin Loaded")
+    bot.log("🎵 YouTube Direct Music Loaded")
 
 def music_task(bot, room_name, query, user):
     try:
-        # Request to our Link Extractor
-        resp = requests.post(API_URL, json={"query": query}, timeout=15)
+        # Request to our Audio Server
+        resp = requests.post(API_URL, json={"query": query}, timeout=30)
         
         if resp.status_code != 200:
-            bot.send_message(room_name, f"❌ Music Service Busy. (Error {resp.status_code})")
+            bot.send_message(room_name, f"❌ Server Error {resp.status_code}")
             return
 
         data = resp.json()
@@ -22,21 +21,20 @@ def music_task(bot, room_name, query, user):
             bot.send_message(room_name, f"❌ {data.get('error')}")
             return
 
-        # Sab kuch ready-made link hai, seedha bhej do!
-        title = data['title']
+        # Direct links are ready!
         audio_url = data['audio_url']
         image_url = data['card_url']
 
-        # 1. Send Cover Art
+        # 1. Send Image
         if image_url:
             bot.send_image(room_name, image_url)
         
         # 2. Send Info & Audio
-        bot.send_message(room_name, f"💿 **Playing:** {title}\n👤 **Req by:** @{user}")
+        bot.send_message(room_name, f"💿 **Playing:** {query.title()}\n👤 **Req by:** @{user}")
         bot.send_audio(room_name, audio_url)
 
     except Exception as e:
-        bot.send_message(room_name, "⚠️ Connection Error.")
+        bot.send_message(room_name, "⚠️ Connection Timeout.")
 
 def handle_command(bot, command, room_name, user, args, data):
     cmd = command.lower().strip()
@@ -46,7 +44,6 @@ def handle_command(bot, command, room_name, user, args, data):
             return True
             
         query = " ".join(args)
-        # Background thread me daalo taki bot free rahe
         threading.Thread(target=music_task, args=(bot, room_name, query, user), daemon=True).start()
         return True
     return False
