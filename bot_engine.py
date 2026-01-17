@@ -173,6 +173,18 @@ class TalkinChatBot:
             "body": "",
             "length": ""
         })
+
+    # ✅ ADDED: Audio Sending Capability
+    def send_audio(self, room_name, url):
+        self.send_json({
+            "handler": "room_message",
+            "id": uuid.uuid4().hex,
+            "room": room_name,
+            "type": "audio",
+            "url": url,
+            "body": "",
+            "length": "0"
+        })
     
     def join_room(self, room_name):
         self.log(f"Joining {room_name}...")
