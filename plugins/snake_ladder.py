@@ -2,6 +2,8 @@ import time
 import threading
 import random
 import gc
+import io
+import requests
 import concurrent.futures
 from PIL import Image, ImageDraw, ImageFont
 
@@ -9,19 +11,30 @@ from PIL import Image, ImageDraw, ImageFont
 import utils
 import db
 
-# --- 🖼️ BOARD MAPPING ---
-BOARD_IMG_PATH = "board.png" # Make sure this is the 400x400 one
+# --- CONFIG ---
+BOARD_URL = "https://www.dropbox.com/scl/fi/q9kp0wa6oswf1uvo4hspx/board.png?rlkey=dvia1wn8838dgf0qtcdych219&st=4h330mdw&dl=1"
 B_SIZE = 400
 S_SIZE = 40 
+BOARD_CACHE = None
 
-# --- 🐍 SNAKES & LADDERS ---
+# Mapping
 LADDERS = {5: 58, 14: 49, 42: 60, 53: 72, 64: 83, 75: 94}
 SNAKES = {38: 20, 45: 7, 51: 10, 76: 54, 91: 73, 97: 61}
 
 sl_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 
 def setup(bot):
-    bot.log("🐍 Snake & Ladders (Avatar Pawns) Loaded")
+    bot.log("🐍 Snake & Ladders Loaded")
+    threading.Thread(target=fetch_board, daemon=True).start()
+
+def fetch_board():
+    global BOARD_CACHE
+    try:
+        r = requests.get(BOARD_URL, timeout=15)
+        if r.status_code == 200:
+            img = Image.open(io.BytesIO(r.content)).convert("RGB")
+            BOARD_CACHE = img.resize((B_SIZE, B_SIZE), Image.Resampling.LANCZOS)
+    except: pass
 
 def get_balance(uid):
     try:
@@ -34,239 +47,163 @@ def get_balance(uid):
         return row[0] if row else 0
     except: return 0
 
-# ==========================================
-# 📦 GAME CLASS
-# ==========================================
 class SnakeLadderGame:
     def __init__(self, bot, room, creator_id, creator_name, icon):
         self.bot = bot
         self.room = room
         self.creator = creator_id
         self.lock = threading.Lock()
-        
         self.players = {"P1": creator_id, "P2": None}
         self.names = {"P1": creator_name, "P2": None}
         self.avatars = {"P1": icon, "P2": ""}
         self.pos = {"P1": 1, "P2": 1}
-        
         self.turn = "P1"
         self.status = "MODE_SELECT"
         self.mode = None 
         self.bet = 0
         self.timer = None
-        
-        self.reset_timer(90, "inactivity")
-        self.bot.send_message(self.room, "🐍 **Snake & Ladders Setup**\nSelect Mode:\n`1` Single Player\n`2` Multiplayer")
+        self.reset_timer(120, "inactivity")
+        self.bot.send_message(self.room, "🐍 **Snake & Ladders**\n`1` Single Player\n`2` Multiplayer")
 
-    # --- COORDINATE LOGIC ---
-    def get_coords(self, pos, player_num):
+    def get_coords(self, pos, p_num):
         idx = pos - 1
-        row = idx // 10
-        col = idx % 10
-        
-        # Zig-Zag (Boustrophedon) path
-        if row % 2 == 1:
-            col = 9 - col
-            
-        # Box center
-        x = col * S_SIZE + 20
-        y = (9 - row) * S_SIZE + 20
-        
-        # 🔥 SAME SQUARE OFFSET: Agar dono same box pe hon to thoda hat ke dikhein
-        if self.pos["P1"] == self.pos["P2"]:
-            if player_num == "P1": return (x - 7, y - 7)
-            else: return (x + 7, y + 7)
-            
+        row, col = idx // 10, idx % 10
+        if row % 2 == 1: col = 9 - col
+        x, y = col * 40 + 20, (9 - row) * 40 + 20
+        if self.pos["P1"] == self.pos["P2"] and pos > 1:
+            return (x-8, y-8) if p_num == "P1" else (x+8, y+8)
         return (x, y)
 
-    # --- VISUAL TASKS ---
-    def send_game_update(self, text_msg):
-        snapshot = {
-            'pos': self.pos.copy(),
-            'names': self.names.copy(),
-            'turn': self.turn,
-            'avatars': self.avatars.copy() # DP URLs ka snapshot
-        }
-        sl_executor.submit(self._bg_image_task, snapshot, text_msg, False, None)
+    def send_game_update(self, text):
+        snap = {'pos': self.pos.copy(), 'names': self.names.copy(), 'turn': self.turn, 'avatars': self.avatars.copy()}
+        sl_executor.submit(self._bg_task, snap, text, False, None)
 
-    def _bg_image_task(self, snap, text, is_win, win_info):
+    def _bg_task(self, snap, text, is_win, info):
         try:
-            img = None
-            if is_win:
-                img = self.draw_winner(win_info)
-            else:
-                img = self.draw_board(snap)
-            
+            img = self.draw_winner(info) if is_win else self.draw_board(snap)
             url = utils.upload_image(img)
             if url:
                 self.bot.send_image(self.room, url)
                 self.bot.send_message(self.room, text)
             else:
-                self.bot.send_message(self.room, f"{text}\n📍 P1: {snap['pos']['P1']} | P2: {snap['pos']['P2']}")
-        except Exception as e:
-            print(f"SL Visual Error: {e}")
-        finally:
-            if 'img' in locals(): del img
-            gc.collect()
+                self.bot.send_message(self.room, f"{text}\n[P1: {snap['pos']['P1']} | P2: {snap['pos']['P2']}]")
+        except: pass
+        finally: gc.collect()
 
     def draw_board(self, data):
-        # 1. Background Board Image
-        canvas = Image.open(BOARD_IMG_PATH).convert("RGB")
-        
-        # 2. Player 1 DP (Pink Border)
-        p1_coords = self.get_coords(data['pos']['P1'], "P1")
-        utils.draw_circle_avatar(
-            canvas, 
-            data['avatars']['P1'], 
-            x=p1_coords[0]-14, # Center pawn (28x28 size)
-            y=p1_coords[1]-14, 
-            size=28, 
-            border_color=(255, 16, 240), 
-            border_width=2
-        )
-        
-        # 3. Player 2 DP (Blue Border)
-        p2_coords = self.get_coords(data['pos']['P2'], "P2")
-        utils.draw_circle_avatar(
-            canvas, 
-            data['avatars']['P2'], 
-            x=p2_coords[0]-14, 
-            y=p2_coords[1]-14, 
-            size=28, 
-            border_color=(44, 255, 255), 
-            border_width=2
-        )
-        
+        canvas = BOARD_CACHE.copy() if BOARD_CACHE else utils.create_canvas(B_SIZE, B_SIZE, (30,30,30))
+        p1 = self.get_coords(data['pos']['P1'], "P1")
+        utils.draw_circle_avatar(canvas, data['avatars']['P1'], p1[0]-14, p1[1]-14, 28, (255,16,240), 2)
+        p2 = self.get_coords(data['pos']['P2'], "P2")
+        utils.draw_circle_avatar(canvas, data['avatars']['P2'], p2[0]-14, p2[1]-14, 28, (44,255,255), 2)
         return canvas
 
     def draw_winner(self, info):
-        canvas = utils.create_canvas(400, 400, color=(17, 24, 39))
-        utils.draw_gradient_bg(canvas, (17, 24, 39), (30, 30, 80))
+        canvas = utils.create_canvas(400, 400, (17,24,39))
+        utils.draw_gradient_bg(canvas, (17,24,39), (20,80,20))
         draw = ImageDraw.Draw(canvas)
-        utils.draw_circle_avatar(canvas, info['av'], 125, 50, 150, border_color=(255, 215, 0), border_width=5)
-        f_main = utils.get_font("arial.ttf", 35)
-        f_sub = utils.get_font("arial.ttf", 20)
-        draw.text((200, 230), "👑 SNAKE CHAMP 👑", font=f_sub, fill="gold", anchor="mm")
-        draw.text((200, 275), info['name'], font=f_main, fill="white", anchor="mm")
-        draw.text((200, 320), f"Coins: +{info['amt']}", font=f_sub, fill=(44, 255, 255), anchor="mm")
+        utils.draw_circle_avatar(canvas, info['av'], 125, 50, 150, (255,215,0), 5)
+        f_m, f_s = utils.get_font("arial.ttf", 35), utils.get_font("arial.ttf", 20)
+        draw.text((200, 230), "👑 CHAMPION", font=f_s, fill="gold", anchor="mm")
+        draw.text((200, 275), info['name'], font=f_m, fill="white", anchor="mm")
+        draw.text((200, 320), f"Coins: +{info['amt']}", font=f_s, fill="cyan", anchor="mm")
         return canvas
 
-    # --- LOGIC HANDLING ---
-    def process_input(self, cmd, uid, user_name, icon):
+    def process_input(self, cmd, uid, name, icon):
         with self.lock:
-            # 1. Mode Select
             if self.status == "MODE_SELECT" and uid == self.creator:
                 if cmd == "1":
-                    self.mode = "single"; self.players['P2'] = "BOT"; self.names['P2'] = "Bot 🤖"
-                    self.avatars['P2'] = "https://robohash.org/snake_bot.png?set=set1"
-                    self.status = "PLAYING"
-                    self.send_game_update("🤖 Started! Your DP vs Bot. Type `roll`.")
-                    self.reset_timer(30, "turn")
+                    self.mode, self.players['P2'], self.names['P2'], self.status = "single", "BOT", "Bot 🤖", "PLAYING"
+                    self.avatars['P2'] = "https://robohash.org/bot"
+                    self.send_game_update("🎮 **Match Started!** Type `roll` to play.")
+                    self.reset_timer(120, "turn")
                 elif cmd == "2":
-                    self.mode = "multi"; self.status = "BET_TYPE"
-                    self.bot.send_message(self.room, "⚖️ **Multiplayer**\n`1` With Bet, `2` No Bet")
-                    self.reset_timer(90, "inactivity")
+                    self.mode, self.status = "multi", "BET_TYPE"
+                    self.bot.send_message(self.room, "⚖️ **Multiplayer**\n`1` With Bet\n`2` No Bet")
                 return True
 
-            # 2. Bet Type
             if self.status == "BET_TYPE" and uid == self.creator:
                 if cmd == "1": self.status = "BET_AMT"; self.bot.send_message(self.room, "💰 Enter Bet Amount:")
-                elif cmd == "2": self.bet = 0; self.status = "WAITING"; self.bot.send_message(self.room, "⚔️ Fun Mode! Type `join`.")
+                elif cmd == "2": self.bet, self.status = 0, "WAITING"; self.bot.send_message(self.room, "⚔️ Fun Mode! Type `join`.")
                 return True
 
-            # 3. Bet Amt
             if self.status == "BET_AMT" and uid == self.creator and cmd.isdigit():
-                amt = int(cmd); bal = get_balance(uid)
-                if amt > bal: self.bot.send_message(self.room, f"❌ Balance: {bal}"); return True
-                self.bet = amt; self.status = "WAITING"
-                self.bot.send_message(self.room, f"⚔️ Waiting for opponent ({amt})... Type `join`.")
+                amt = int(cmd)
+                if amt > get_balance(uid): self.bot.send_message(self.room, "❌ Low Balance!"); return True
+                self.bet, self.status = amt, "WAITING"
+                self.bot.send_message(self.room, f"⚔️ Betting {amt}. Type `join` to play.")
                 return True
 
-            # 4. Join
             if self.status == "WAITING" and cmd == "join":
                 if uid == self.creator: return True
-                if self.bet > 0 and get_balance(uid) < self.bet: self.bot.send_message(self.room, "❌ Low Balance!"); return True
-                self.players['P2'] = uid; self.names['P2'] = user_name; self.avatars['P2'] = icon
-                self.status = "PLAYING"
-                self.send_game_update(f"⚔️ Match On! @{self.names['P1']} vs @{user_name}")
-                self.reset_timer(30, "turn")
+                if self.bet > get_balance(uid): self.bot.send_message(self.room, "❌ Low Balance!"); return True
+                self.players['P2'], self.names['P2'], self.avatars['P2'], self.status = uid, name, icon, "PLAYING"
+                self.send_game_update(f"⚔️ **Match On!** @{self.names['P1']} vs @{name}")
+                self.reset_timer(120, "turn")
                 return True
 
-            # 5. Roll Dice
-            if self.status == "PLAYING" and (cmd == "roll" or cmd == "!roll"):
+            if self.status == "PLAYING" and cmd in ["roll", "!roll"]:
                 if uid != self.players[self.turn]: return False
-                
                 dice = random.randint(1, 6)
-                old_pos = self.pos[self.turn]
-                new_pos = old_pos + dice
-                event = f"🎲 @{self.names[self.turn]} rolled {dice}."
-                
-                if new_pos > 100: new_pos = old_pos; event += " (Too high!)"
+                old = self.pos[self.turn]
+                new = old + dice
+                msg = f"🎲 @{self.names[self.turn]} rolled {dice}."
+                if new > 100: new = old; msg += " (Wait for exact 100)"
                 else:
-                    if new_pos in LADDERS: new_pos = LADDERS[new_pos]; event += " 🪜 Ladder!"
-                    elif new_pos in SNAKES: new_pos = SNAKES[new_pos]; event += " 🐍 Snake!"
-                
-                self.pos[self.turn] = new_pos
-                if new_pos == 100: self.finalize_game(self.turn); return True
-                
+                    if new in LADDERS: new = LADDERS[new]; msg += " 🪜 Ladder!"
+                    elif new in SNAKES: new = SNAKES[new]; msg += " 🐍 Snake!"
+                self.pos[self.turn] = new
+                if new == 100: self.finalize(self.turn); return True
                 self.turn = "P2" if self.turn == "P1" else "P1"
-                
                 if self.mode == "single" and self.turn == "P2":
-                    b_dice = random.randint(1, 6)
-                    b_new = self.pos["P2"] + b_dice
-                    if b_new <= 100:
-                        if b_new in LADDERS: b_new = LADDERS[b_new]
-                        elif b_new in SNAKES: b_new = SNAKES[b_new]
-                        self.pos["P2"] = b_new
-                    if self.pos["P2"] == 100: self.finalize_game("P2"); return True
-                    self.turn = "P1"; event += f"\n🤖 Bot rolled {b_dice}."
-
-                self.send_game_update(f"{event}\nTurn: @{self.names[self.turn]}")
-                self.reset_timer(30, "turn")
+                    bd = random.randint(1, 6)
+                    bn = self.pos["P2"] + bd
+                    if bn <= 100:
+                        if bn in LADDERS: bn = LADDERS[bn]
+                        elif bn in SNAKES: bn = SNAKES[bn]
+                        self.pos["P2"] = bn
+                    if self.pos["P2"] == 100: self.finalize("P2"); return True
+                    self.turn = "P1"; msg += f"\n🤖 Bot rolled {bd}. Now at {self.pos['P2']}."
+                self.send_game_update(f"{msg}\nNext: @{self.names[self.turn]}")
+                self.reset_timer(120, "turn")
                 return True
         return False
 
-    def finalize_game(self, winner_sym):
-        w_uid = self.players[winner_sym]
-        amt = self.bet
-        if self.mode == "single" and winner_sym == "P1":
-            amt = 1000
-            db.add_game_result(w_uid, self.names[winner_sym], "snake_ladder", amt, True)
-        elif self.mode == "multi":
-            db.add_game_result(w_uid, self.names[winner_sym], "snake_ladder", amt, True)
-            db.add_game_result(self.players["P2" if winner_sym=="P1" else "P1"], self.names["P2" if winner_sym=="P1" else "P1"], "snake_ladder", -amt, False)
-        
-        info = {'name': self.names[winner_sym], 'av': self.avatars[winner_sym], 'amt': amt}
-        sl_executor.submit(self._bg_image_task, None, f"🏆 @{info['name']} Wins!", True, info)
+    def finalize(self, win_sym):
+        w_uid, amt = self.players[win_sym], self.bet
+        if self.mode == "single": amt = 1000 if win_sym == "P1" else 0
+        db.add_game_result(w_uid, self.names[win_sym], "snake_ladder", amt, True)
+        if self.mode == "multi":
+            loser = "P2" if win_sym == "P1" else "P1"
+            db.add_game_result(self.players[loser], self.names[loser], "snake_ladder", -amt, False)
+        info = {'name': self.names[win_sym], 'av': self.avatars[win_sym], 'amt': amt}
+        sl_executor.submit(self._bg_task, None, f"🏆 @{info['name']} reached 100!", True, info)
         self.cleanup()
 
     def reset_timer(self, sec, res):
         if self.timer: self.timer.cancel()
-        self.timer = threading.Timer(sec, self.timeout_handler, [res])
+        self.timer = threading.Timer(sec, self.timeout_task, [res])
         self.timer.daemon = True
         self.timer.start()
 
-    def timeout_handler(self, reason):
+    def timeout_task(self, reason):
         with self.lock:
             if self.status == "ENDED": return
             if reason == "inactivity": self.bot.send_message(self.room, "⚠️ Timeout."); self.cleanup()
-            else: self.finalize_game("P2" if self.turn == "P1" else "P1")
+            else: self.finalize("P2" if self.turn == "P1" else "P1")
 
     def cleanup(self):
         self.status = "ENDED"
         if self.timer: self.timer.cancel()
         if self.room in active_sl: del active_sl[self.room]
-        gc.collect()
 
 active_sl = {}
 def handle_command(bot, command, room_name, user, args, data):
-    cmd = command.lower().strip()
-    uid = str(data.get("user_id", user))
-    icon = data.get("avatar_url", data.get("icon", data.get("avatar", "")))
+    cmd, uid = command.lower().strip(), str(data.get("user_id", user))
+    icon = data.get("avatar_url", data.get("icon", ""))
     if cmd == "sl":
         if args and args[0] == "1":
-            if room_name in active_sl: return True
-            active_sl[room_name] = SnakeLadderGame(bot, room_name, uid, user, icon)
+            if room_name not in active_sl: active_sl[room_name] = SnakeLadderGame(bot, room_name, uid, user, icon)
             return True
         if args and args[0] == "0":
             if room_name in active_sl: active_sl[room_name].cleanup(); bot.send_message(room_name, "🛑 Stopped.")
