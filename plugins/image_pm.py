@@ -15,9 +15,9 @@ THEMES = [
 ]
 
 def setup(bot):
-    bot.log("🎨 PM Master (v3 - No Brackets) Loaded")
+    bot.log("🎨 Direct Image PM Loaded")
 
-# ... (text_wrap and generate_image functions wahi rahenge, koi change nahi) ...
+# ... (text_wrap and generate_image functions wahi rahenge, no change) ...
 def text_wrap(text, font, max_w):
     lines = []; words = text.split(' ')
     i = 0
@@ -52,30 +52,29 @@ def generate_image(sender, text):
     draw.text((W-30,H-30), f"From: @{sender}", font=utils.get_font("arial.ttf", 16), fill="#ffffff80", anchor="rs")
     return canvas
 
-# --- BACKGROUND WORKERS ---
+# --- BACKGROUND WORKER (Cleaned) ---
 def pmi_task(bot, sender, target, message):
     try:
+        # 1. Image Banao
         img = generate_image(sender, message)
+        
+        # 2. Upload Karo
         url = utils.upload_image(img)
         
+        # 3. Seedha Image Bhej Do (No Extra Text)
         if url:
             bot.send_pm_image(target, url)
-            # Sender ko confirmation bhej sakte hain (Optional)
-            bot.send_pm_message(sender, f"✅ Image successfully sent to @{target}")
         else:
-            bot.send_pm_message(sender, f"❌ Failed to send image to @{target}. Upload error.")
+            # Agar fail hua toh sender ko batao
+            bot.send_pm_message(sender, f"❌ Failed to send image. Upload error.")
     finally:
         gc.collect()
 
-def pm_task(bot, sender, target, message):
-    bot.send_pm_message(target, f"📩 PM from @{sender}: {message}")
-    bot.send_pm_message(sender, f"✅ Text message sent to @{target}")
-
-# --- COMMAND HANDLER ---
+# --- COMMAND HANDLER (Cleaned) ---
 def handle_command(bot, command, room_name, user, args, data):
     cmd = command.lower().strip()
     
-    # --- 1. IMAGE PM (!pmi) ---
+    # --- Image PM Command ---
     if cmd == "pmi":
         if len(args) < 2:
             bot.send_message(room_name, "❌ Use: `!pmi <user> <message>`")
@@ -84,12 +83,12 @@ def handle_command(bot, command, room_name, user, args, data):
         target_user = args[0]
         message_text = " ".join(args[1:])
         
-        bot.send_message(room_name, f"✅ Preparing to send image PM to @{target_user}...")
+        bot.send_message(room_name, f"✅ Sending image to @{target_user}'s PM...")
         threading.Thread(target=pmi_task, args=(bot, user, target_user, message_text), daemon=True).start()
         
         return True
 
-    # --- 2. TEXT PM (!pm) ---
+    # --- Text PM Command (Alag se) ---
     if cmd == "pm":
         if len(args) < 2:
             bot.send_message(room_name, "❌ Use: `!pm <user> <message>`")
@@ -98,8 +97,9 @@ def handle_command(bot, command, room_name, user, args, data):
         target_user = args[0]
         message_text = " ".join(args[1:])
         
-        # Iske liye thread ki zaroorat nahi, ye fast hai
-        pm_task(bot, user, target_user, message_text)
+        # Ye fast hai, thread ki zaroorat nahi
+        bot.send_pm_message(target_user, f"📩 PM from @{user}: {message_text}")
+        bot.send_message(room_name, f"✅ Text PM sent to @{target_user}")
         
         return True
 
