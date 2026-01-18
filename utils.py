@@ -6,21 +6,15 @@ import threading
 import time
 import gc
 import uuid
-import base64
 import logging
 from PIL import Image, ImageDraw, ImageFont
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION & SAFETY ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# 🔥 TINYPNG API KEY (Aapki Key daal di hai)
-TINYPNG_API_KEY = "bkqK1RGz19FMtkstv9k6Ynwc0HHTXZf5"
-
-# --- LOCKS & CACHE ---
 font_lock = threading.Lock()
 print_lock = threading.Lock()
 FONT_CACHE = {}
-MAX_FONT_CACHE = 30
+MAX_FONT_CACHE = 30 
 logging.basicConfig(level=logging.ERROR)
 
 def safe_print(msg):
@@ -47,14 +41,13 @@ def get_font(font_name="arial.ttf", size=20):
 
 # --- 2. TEXT UTILS (Full) ---
 def fancy_text(text):
-    normal = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    fancy  = "ᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ₀₁₂₃₄₅₆₇₈₉"
-    return str(text).translate(str.maketrans(normal, fancy))
+    n = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    f = "ᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ₀₁₂₃₄₅₆₇₈₉"
+    return str(text).translate(str.maketrans(n, f))
 
 # --- 3. GRAPHIC ENGINE (Full) ---
 def create_canvas(w, h, color=(0,0,0)): return Image.new('RGB', (w,h), color)
-
-def draw_circle_avatar(canvas, url, x, y, size, border_color=(255,255,255), border_width=4):
+def draw_circle_avatar(canvas, url, x, y, size, **kwargs):
     try:
         if not url: return
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -64,74 +57,55 @@ def draw_circle_avatar(canvas, url, x, y, size, border_color=(255,255,255), bord
             av = av_raw.convert("RGBA").resize((size,size), Image.Resampling.LANCZOS)
             mask = Image.new("L", (size,size), 0); ImageDraw.Draw(mask).ellipse((0,0,size,size), fill=255)
             canvas.paste(av, (x,y), mask)
-        if border_width > 0: ImageDraw.Draw(canvas).ellipse([x-border_width,y-border_width,x+size+border_width,y+size+border_width], outline=border_color, width=border_width)
-    except Exception as e: safe_print(f"❌ Avatar Error: {e}")
-
+        if kwargs.get('border_width', 0) > 0: ImageDraw.Draw(canvas).ellipse([x-kwargs['border_width'],y-kwargs['border_width'],x+size+kwargs['border_width'],y+size+kwargs['border_width']], outline=kwargs['border_color'], width=kwargs['border_width'])
+    except: pass
 def draw_gradient_bg(canvas, start, end):
-    w, h = canvas.size; base=Image.new('RGB',(w,h),start); top=Image.new('RGB',(w,h),end)
-    mask=Image.new('L',(w,h)); mask_data=[]
-    for y in range(h): mask_data.extend([int(255*(y/h))]*w)
-    mask.putdata(mask_data); canvas.paste(top,(0,0),mask)
+    w,h=canvas.size; base=Image.new('RGB',(w,h),start); top=Image.new('RGB',(w,h),end)
+    mask=Image.new('L',(w,h)); d=[]
+    for y in range(h): d.extend([int(255*(y/h))]*w)
+    mask.putdata(d); canvas.paste(top,(0,0),mask)
+def draw_rounded_rect(canvas, coords, r, color, **kwargs):
+    ImageDraw.Draw(canvas).rounded_rectangle(coords, r, fill=color, **kwargs)
 
-def draw_rounded_rect(canvas, coords, radius, color, width=0, outline=None):
-    d = ImageDraw.Draw(canvas)
-    if width > 0:
-        d.rounded_rectangle(coords, radius=radius, outline=outline or color, width=width)
-    else:
-        d.rounded_rectangle(coords, radius=radius, fill=color)
-
-# --- 🔥 TINYPNG UPLOADER (THE SPEED FIX) ---
+# --- 🔥 THE ULTIMATE LIGHTWEIGHT UPLOADER 🔥 ---
 def upload_image(image):
     url = None
     buf = None
     try:
-        # 1. Image ko High Quality buffer me daalo
         buf = io.BytesIO()
-        image.convert("RGB").save(buf, format='JPEG', quality=90)
         
-        # 2. TinyPNG se compress karo
-        # safe_print("🚀 Compressing with TinyPNG...")
-        api_url = "https://api.tinify.com/shrink"
-        response = requests.post(api_url, auth=("api", TINYPNG_API_KEY), data=buf.getvalue(), timeout=30)
+        # 1. Convert to RGB (zaroori hai JPEG ke liye)
+        img_rgb = image.convert("RGB")
         
-        if response.status_code != 201:
-            safe_print(f"❌ TinyPNG Error: {response.text}")
-            # Agar TinyPNG fail ho, toh Imgbb try karo
-            return upload_fallback(image)
+        # 2. Color Reduction (Quantize) - Size bohot kam kar dega
+        # Ye colors ko 256 tak limit kar dega
+        img_quantized = img_rgb.quantize(colors=256)
+        
+        # Quantize ke baad wapas RGB me convert karo taaki save ho sake
+        img_to_save = img_quantized.convert("RGB")
 
-        # Compressed image ka URL
-        compressed_url = response.json()['output']['url']
+        # 3. Save with Smart Quality & Progressive Scan
+        img_to_save.save(buf,
+                         format='JPEG',
+                         quality=75,       # 75% quality (Best balance)
+                         optimize=True,    # Faltu data hatao
+                         progressive=True) # Fast loading effect
         
-        # 3. Compressed image ko download karo
-        compressed_data = requests.get(compressed_url).content
+        buf.seek(0)
+        files = {'reqtype':(None,'fileupload'), 'fileToUpload':(f'bot_{uuid.uuid4().hex}.jpg', buf, 'image/jpeg')}
         
-        # 4. Catbox par upload karo (Fastest for delivery)
-        files = {'reqtype':(None,'fileupload'), 'fileToUpload':('tiny.jpg', compressed_data, 'image/jpeg')}
+        # Catbox fast hai, isliye wahi use karenge
         r = requests.post('https://catbox.moe/user/api.php', files=files, headers={'Connection':'close'}, timeout=30)
         
-        if r.status_code == 200:
+        if r.status_code == 200 and "http" in r.text:
             url = r.text.strip()
-            # safe_print(f"🎉 Final URL: {url}")
-            
+        else:
+            safe_print(f"❌ Upload Fail (Catbox): {r.status_code}")
+
     except Exception as e:
-        safe_print(f"❌ Upload Error: {e}")
+        safe_print(f"❌ Internal Upload Error: {e}")
     finally:
         if buf: buf.close()
         gc.collect()
             
     return url
-
-def upload_fallback(image):
-    """Agar TinyPNG fail ho jaye to ye backup chalega"""
-    safe_print("⚠️ TinyPNG failed. Using fallback uploader...")
-    # (Yahan aap Imgbb ya Catbox ka direct code daal sakte hain, for now just Catbox)
-    try:
-        buf = io.BytesIO()
-        image.convert("RGB").save(buf, format='JPEG', quality=75)
-        buf.seek(0)
-        files = {'reqtype':(None,'fileupload'), 'fileToUpload':('fallback.jpg', buf, 'image/jpeg')}
-        r = requests.post('https://catbox.moe/user/api.php', files=files, headers={'Connection':'close'}, timeout=30)
-        if r.status_code == 200:
-            return r.text.strip()
-    except: return None
-    return None
