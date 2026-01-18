@@ -37,41 +37,33 @@ class PluginManager:
 
     def process_message(self, data):
         """
-        Processes incoming message from TalkinChat.
-        Expected data format: {"body": "text", "room": "name", "from": "username", ...}
+        Processes incoming ROOM messages from TalkinChat.
         """
-        # 1. Safely get text
         text = data.get("body")
         if not text: 
-            return # Ignore non-text messages (like images without caption)
+            return
 
         room_name = data.get("room")
         user = data.get("from", "Unknown")
         
-        # 2. Debug Log (Ye batayega ki bot message padh raha hai)
-        # self.bot.log(f"🔍 Checking: {text} | By: {user}")
-
-        # 3. Parse Command
         cmd = ""
         args = []
         
         if text.startswith("!"):
-            parts = text[1:].split(" ") # Remove '!' and split
-            cmd = parts[0].lower()      # Command ko lowercase karo (tic, ping)
-            args = parts[1:]            # Baaki sab arguments
+            parts = text[1:].split(" ")
+            cmd = parts[0].lower()
+            args = parts[1:]
             
             self.bot.log(f"⚡ Command Detected: [{cmd}] in {room_name}")
 
-            # 4. Dispatch to Plugins
             handled = False
             for name, module in self.plugins.items():
                 if hasattr(module, 'handle_command'):
                     try:
-                        # Plugin ko call karo
                         if module.handle_command(self.bot, cmd, room_name, user, args, data):
                             self.bot.log(f"✅ Executed by Plugin: {name}")
                             handled = True
-                            break # Command handle ho gaya, loop roko
+                            break
                     except Exception as e:
                         self.bot.log(f"❌ Plugin Error ({name}): {e}")
                         traceback.print_exc()
@@ -80,13 +72,42 @@ class PluginManager:
                 self.bot.log(f"⚠️ Unknown Command: {cmd}")
 
         else:
-            # Agar '!' nahi hai, tab bhi game plugins ko bhejo (jaise number guess ya tic tac toe move)
+            # Handle non-command text (for games like TTT moves)
             cmd = text.strip()
             for name, module in self.plugins.items():
                 if hasattr(module, 'handle_command'):
                     try:
-                        if module.handle_command(self.bot, cmd, room_name, user, args, data):
+                        if module.handle_command(self.bot, cmd, room_name, user, [], data):
                             return True
                     except:
                         pass
         return False
+
+    # --- 🔥 NEW: PM (INBOX) MESSAGE HANDLER 🔥 ---
+    def process_private_message(self, data):
+        """
+        Processes incoming PRIVATE messages from TalkinChat.
+        """
+        text = data.get("body", "").strip()
+        user = data.get("from")
+        
+        if not text or not user: return
+
+        # Command Parse karo
+        if text.startswith("!"):
+            parts = text[1:].split(" ")
+            cmd = parts[0].lower()
+            args = parts[1:]
+            
+            self.bot.log(f"⚡ PM Command Detected: [{cmd}] by {user}")
+
+            # Plugin dhoondo jo 'handle_pm' support karta ho
+            for name, module in self.plugins.items():
+                if hasattr(module, 'handle_pm'):
+                    try:
+                        if module.handle_pm(self.bot, cmd, user, args, data):
+                            self.bot.log(f"✅ PM Handled by Plugin: {name}")
+                            break
+                    except Exception as e:
+                        self.bot.log(f"❌ PM Plugin Error ({name}): {e}")
+                        traceback.print_exc()
