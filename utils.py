@@ -13,8 +13,8 @@ from PIL import Image, ImageDraw, ImageFont
 # --- CONFIGURATION ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 🔥 IMGBB API KEY (Aapki Key)
-IMGBB_API_KEY = "e4e441cad420ecfac5c61786331f1d37"
+# 🔥 TINYPNG API KEY (Aapki Key daal di hai)
+TINYPNG_API_KEY = "bkqK1RGz19FMtkstv9k6Ynwc0HHTXZf5"
 
 # --- LOCKS & CACHE ---
 font_lock = threading.Lock()
@@ -73,7 +73,6 @@ def draw_gradient_bg(canvas, start, end):
     for y in range(h): mask_data.extend([int(255*(y/h))]*w)
     mask.putdata(mask_data); canvas.paste(top,(0,0),mask)
 
-# 🔥 draw_rounded_rect is BACK
 def draw_rounded_rect(canvas, coords, radius, color, width=0, outline=None):
     d = ImageDraw.Draw(canvas)
     if width > 0:
@@ -81,35 +80,39 @@ def draw_rounded_rect(canvas, coords, radius, color, width=0, outline=None):
     else:
         d.rounded_rectangle(coords, radius=radius, fill=color)
 
-# --- 4. MEDIA UPLOADER (Imgbb - The Stable One) ---
+# --- 🔥 TINYPNG UPLOADER (THE SPEED FIX) ---
 def upload_image(image):
     url = None
     buf = None
     try:
+        # 1. Image ko High Quality buffer me daalo
         buf = io.BytesIO()
-        # JPEG for fast loading
-        image.convert("RGB").save(buf, format='JPEG', quality=85)
-        buf.seek(0)
+        image.convert("RGB").save(buf, format='JPEG', quality=90)
         
-        # Base64 encode
-        img_base64 = base64.b64encode(buf.read())
+        # 2. TinyPNG se compress karo
+        # safe_print("🚀 Compressing with TinyPNG...")
+        api_url = "https://api.tinify.com/shrink"
+        response = requests.post(api_url, auth=("api", TINYPNG_API_KEY), data=buf.getvalue(), timeout=30)
         
-        payload = {
-            'key': IMGBB_API_KEY,
-            'image': img_base64
-        }
-        
-        # Upload
-        # safe_print("⬆️ Uploading to imgbb...")
-        r = requests.post("https://api.imgbb.com/1/upload", data=payload, timeout=30)
-        
-        data = r.json()
-        if data.get('success'):
-            url = data['data']['url']
-            # safe_print(f"✅ imgbb Link: {url}")
-        else:
-            safe_print(f"❌ imgbb Error: {data.get('error', {}).get('message', 'Unknown')}")
+        if response.status_code != 201:
+            safe_print(f"❌ TinyPNG Error: {response.text}")
+            # Agar TinyPNG fail ho, toh Imgbb try karo
+            return upload_fallback(image)
 
+        # Compressed image ka URL
+        compressed_url = response.json()['output']['url']
+        
+        # 3. Compressed image ko download karo
+        compressed_data = requests.get(compressed_url).content
+        
+        # 4. Catbox par upload karo (Fastest for delivery)
+        files = {'reqtype':(None,'fileupload'), 'fileToUpload':('tiny.jpg', compressed_data, 'image/jpeg')}
+        r = requests.post('https://catbox.moe/user/api.php', files=files, headers={'Connection':'close'}, timeout=30)
+        
+        if r.status_code == 200:
+            url = r.text.strip()
+            # safe_print(f"🎉 Final URL: {url}")
+            
     except Exception as e:
         safe_print(f"❌ Upload Error: {e}")
     finally:
@@ -117,3 +120,18 @@ def upload_image(image):
         gc.collect()
             
     return url
+
+def upload_fallback(image):
+    """Agar TinyPNG fail ho jaye to ye backup chalega"""
+    safe_print("⚠️ TinyPNG failed. Using fallback uploader...")
+    # (Yahan aap Imgbb ya Catbox ka direct code daal sakte hain, for now just Catbox)
+    try:
+        buf = io.BytesIO()
+        image.convert("RGB").save(buf, format='JPEG', quality=75)
+        buf.seek(0)
+        files = {'reqtype':(None,'fileupload'), 'fileToUpload':('fallback.jpg', buf, 'image/jpeg')}
+        r = requests.post('https://catbox.moe/user/api.php', files=files, headers={'Connection':'close'}, timeout=30)
+        if r.status_code == 200:
+            return r.text.strip()
+    except: return None
+    return None
