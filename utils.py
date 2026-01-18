@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 # --- CONFIGURATION ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 🔥 IMGBB API KEY (Aapki Key daal di hai)
+# 🔥 IMGBB API KEY (Aapki Key)
 IMGBB_API_KEY = "e4e441cad420ecfac5c61786331f1d37"
 
 # --- LOCKS & CACHE ---
@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.ERROR)
 def safe_print(msg):
     with print_lock: print(msg)
 
-# --- FONT LOADER ---
+# --- 1. FONT LOADER (Full) ---
 def get_font(font_name="arial.ttf", size=20):
     global FONT_CACHE
     cache_key = f"{font_name}_{size}"
@@ -45,7 +45,13 @@ def get_font(font_name="arial.ttf", size=20):
         FONT_CACHE[cache_key] = font_obj
         return font_obj
 
-# --- GRAPHIC ENGINE ---
+# --- 2. TEXT UTILS (Full) ---
+def fancy_text(text):
+    normal = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    fancy  = "ᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢᴀʙᴄᴅᴇғɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ₀₁₂₃₄₅₆₇₈₉"
+    return str(text).translate(str.maketrans(normal, fancy))
+
+# --- 3. GRAPHIC ENGINE (Full) ---
 def create_canvas(w, h, color=(0,0,0)): return Image.new('RGB', (w,h), color)
 
 def draw_circle_avatar(canvas, url, x, y, size, border_color=(255,255,255), border_width=4):
@@ -67,19 +73,25 @@ def draw_gradient_bg(canvas, start, end):
     for y in range(h): mask_data.extend([int(255*(y/h))]*w)
     mask.putdata(mask_data); canvas.paste(top,(0,0),mask)
 
-def draw_rounded_rect(canvas, coords, r, color, **kwargs):
-    ImageDraw.Draw(canvas).rounded_rectangle(coords, r, fill=color, **kwargs)
+# 🔥 draw_rounded_rect is BACK
+def draw_rounded_rect(canvas, coords, radius, color, width=0, outline=None):
+    d = ImageDraw.Draw(canvas)
+    if width > 0:
+        d.rounded_rectangle(coords, radius=radius, outline=outline or color, width=width)
+    else:
+        d.rounded_rectangle(coords, radius=radius, fill=color)
 
-# --- 🔥 IMGBB UPLOADER (THE FIX) ---
+# --- 4. MEDIA UPLOADER (Imgbb - The Stable One) ---
 def upload_image(image):
     url = None
     buf = None
     try:
         buf = io.BytesIO()
+        # JPEG for fast loading
         image.convert("RGB").save(buf, format='JPEG', quality=85)
         buf.seek(0)
         
-        # Image ko Base64 me convert karo
+        # Base64 encode
         img_base64 = base64.b64encode(buf.read())
         
         payload = {
@@ -88,20 +100,20 @@ def upload_image(image):
         }
         
         # Upload
-        safe_print("⬆️ Uploading to imgbb...")
+        # safe_print("⬆️ Uploading to imgbb...")
         r = requests.post("https://api.imgbb.com/1/upload", data=payload, timeout=30)
         
         data = r.json()
-        if data['success']:
+        if data.get('success'):
             url = data['data']['url']
-            safe_print(f"✅ imgbb Link: {url}")
+            # safe_print(f"✅ imgbb Link: {url}")
         else:
-            safe_print(f"❌ imgbb Error: {data['error']['message']}")
+            safe_print(f"❌ imgbb Error: {data.get('error', {}).get('message', 'Unknown')}")
 
     except Exception as e:
         safe_print(f"❌ Upload Error: {e}")
     finally:
         if buf: buf.close()
-        gc.collect() # Cleanup
+        gc.collect()
             
     return url
