@@ -11,20 +11,19 @@ import utils
 import db
 
 # --- CONFIGURATION ---
-GRID_SIZE = 5
-CELL_COUNT = 25
-IMG_SIZE = 500
-CELL_SIZE = IMG_SIZE // GRID_SIZE # 100px
+GRID_COLS, GRID_ROWS = 4, 3
+CELL_COUNT = 12
+IMG_W, IMG_H = 600, 450
+CELL_SIZE = 150 
 
-# Colors
 BG_DARK = (12, 14, 22)
-NEON_BLUE = (44, 255, 255)
+RED_BLAST = (255, 69, 0)
 ACCENT_GOLD = (255, 200, 40)
 
 mines_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 
 def setup(bot):
-    bot.log("💣 Mines PvP (Bomb vs Cookie) Loaded")
+    bot.log("💣 Mines (Self-Blast Edition) Loaded")
 
 # ==========================================
 # 📦 MINES GAME CLASS
@@ -38,24 +37,22 @@ class MinesGame:
         self.names = {"P1": creator_name, "P2": None}
         self.avatars = {"P1": icon, "P2": ""}
         
-        # Stats for Winner Card
         self.stats = {
             "P1": {"cookies": 0, "bombs": 0, "hp": 3},
             "P2": {"cookies": 0, "bombs": 0, "hp": 3}
         }
         
-        # Grid Setup: 'C' for Cookie, 'B' for Bomb
-        tiles = (['C'] * 15) + (['B'] * 10)
+        # 8 Cookies, 4 Bombs
+        tiles = (['C'] * 8) + (['B'] * 4)
         random.shuffle(tiles)
         self.grid = tiles
-        self.revealed = [False] * CELL_COUNT
+        self.revealed = [None] * CELL_COUNT 
         
         self.turn = "P1"
-        self.status = "WAITING" # WAITING -> PLAYING -> ENDED
+        self.status = "WAITING" 
         self.timer = None
-        
         self.reset_timer(120)
-        self.bot.send_message(self.room, "💣 **Mines PvP Started!**\n25 Tiles: Find Cookies 🍪 or Drop Bombs 💣\nType `join` to challenge!")
+        self.bot.send_message(self.room, "💣 **Mines: Self-Blast Mode!**\nDon't touch the bombs! 3 Blasts = Game Over.\nType `join` to challenge!")
 
     def reset_timer(self, sec):
         if self.timer: self.timer.cancel()
@@ -65,140 +62,138 @@ class MinesGame:
 
     # --- GRAPHICS: BOARD ---
     def draw_board(self):
-        canvas = utils.create_canvas(IMG_SIZE, IMG_SIZE, color=BG_DARK)
+        canvas = utils.create_canvas(IMG_W, IMG_H, color=BG_DARK)
         draw = ImageDraw.Draw(canvas)
-        font = utils.get_font("arial.ttf", 30)
         
         for i in range(CELL_COUNT):
-            x = (i % GRID_SIZE) * CELL_SIZE
-            y = (i // GRID_SIZE) * CELL_SIZE
+            col, row = i % GRID_COLS, i // GRID_COLS
+            x, y = col * CELL_SIZE, row * CELL_SIZE
+            shape = [x+8, y+8, x+CELL_SIZE-8, y+CELL_SIZE-8]
             
-            # Tile Box
-            shape = [x+5, y+5, x+CELL_SIZE-5, y+CELL_SIZE-5]
-            if not self.revealed[i]:
-                # Hidden Tile (Arcade Style)
-                draw.rounded_rectangle(shape, radius=10, fill=(30, 35, 50), outline=(60, 70, 90), width=2)
-                draw.text((x+35, y+30), str(i+1), font=font, fill=(100, 110, 130))
+            if self.revealed[i] is None:
+                draw.rounded_rectangle(shape, radius=15, fill=(30, 35, 50), outline=(60, 70, 90), width=2)
+                draw.text((x+60, y+50), str(i+1), font=utils.get_font("arial.ttf", 40), fill=(100, 110, 130))
             else:
-                # Revealed Tile
+                rev_by = self.revealed[i]
                 content = self.grid[i]
-                color = (40, 180, 100) if content == 'C' else (200, 50, 50)
-                draw.rounded_rectangle(shape, radius=10, fill=color, outline="white", width=2)
-                icon = "🍪" if content == 'C' else "💣"
-                draw.text((x+30, y+25), icon, font=font, fill="white")
+                tile_color = (40, 120, 80) if content == 'C' else (180, 40, 40)
+                draw.rounded_rectangle(shape, radius=15, fill=tile_color, outline="white", width=2)
+                
+                icon = "🍪" if content == 'C' else "💥"
+                draw.text((x+20, y+85), icon, font=utils.get_font("arial.ttf", 30))
+                # Tile pe hamesha kholne wale ki DP dikhegi
+                utils.draw_circle_avatar(canvas, self.avatars[rev_by], x+75, y+45, 65, border_color=(255,255,255), border_width=2)
+                    
         return canvas
 
-    # --- GRAPHICS: PREMIUM WINNER CARD ---
-    def draw_winner_card(self, winner_p):
-        W, H = 900, 600
-        winner_name = self.names[winner_p]
-        winner_avatar = self.avatars[winner_p]
-        cookies = self.stats[winner_p]['cookies']
-        bombs = self.stats[winner_p]['bombs']
+    # --- GRAPHICS: HIT CARD (BLAST EFFECT) ---
+    def draw_hit_card(self, blasted_player_sym):
+        W, H = 800, 500
+        canvas = Image.new("RGB", (W, H), (10, 0, 0))
+        draw = ImageDraw.Draw(canvas)
+        utils.draw_gradient_bg(canvas, (60, 0, 0), (10, 0, 0))
 
-        # 1. Base
+        cx, cy = W//2, H//2
+        # Blasted Player's BIG Avatar
+        utils.draw_circle_avatar(canvas, self.avatars[blasted_player_sym], cx-110, cy-130, 220, border_color=(255,0,0), border_width=8)
+
+        # Blast Particles
+        for _ in range(20):
+            draw.line([(cx, cy), (cx+random.randint(-300,300), cy+random.randint(-300,300))], fill=RED_BLAST, width=random.randint(2,8))
+
+        f_hit = utils.get_font("arial.ttf", 90)
+        draw.text((W//2, 100), "BOOM!", font=f_hit, fill=RED_BLAST, anchor="mm", stroke_width=4, stroke_fill="white")
+        draw.text((W//2, 420), f"@{self.names[blasted_player_sym]} BLASTED!", font=utils.get_font("arial.ttf", 40), fill="white", anchor="mm")
+        return canvas
+
+    # --- GRAPHICS: FINAL WINNER CARD ---
+    def draw_winner_card(self, winner_sym):
+        W, H = 900, 600
         canvas = Image.new("RGB", (W, H), (12, 14, 22))
         draw = ImageDraw.Draw(canvas)
-        utils.draw_gradient_bg(canvas, (12, 14, 22), (25, 30, 50))
+        utils.draw_gradient_bg(canvas, (12, 14, 22), (30, 60, 30))
 
-        # 2. Outer Glow Frame
-        utils.draw_rounded_rect(canvas, [50, 50, 850, 550], radius=40, color=(255, 180, 0, 30))
-        
-        # 3. Main Card Panel
-        utils.draw_rounded_rect(canvas, [70, 70, 830, 530], radius=30, color=(25, 28, 40))
-
-        # 4. Winner Avatar (Big Center)
         cx, cy = W//2, H//2 - 20
-        # Avatar Glow
-        draw.ellipse([cx-110, cy-110, cx+110, cy+110], outline=ACCENT_GOLD, width=10)
-        utils.draw_circle_avatar(canvas, winner_avatar, cx-100, cy-100, 200, border_color="white", border_width=4)
+        utils.draw_circle_avatar(canvas, self.avatars[winner_sym], cx-100, cy-100, 200, border_color=ACCENT_GOLD, border_width=6)
 
-        # 5. Text
-        f_title = utils.get_font("arial.ttf", 70)
-        f_name = utils.get_font("arial.ttf", 45)
-        f_stat = utils.get_font("arial.ttf", 28)
-
-        draw.text((W//2, 130), "WINNER", font=f_title, fill=ACCENT_GOLD, anchor="mm")
-        draw.text((cx, cy + 130), winner_name, font=f_name, fill="white", anchor="mm")
-        draw.text((cx, cy + 175), "Champion of the Match", font=f_stat, fill=(180, 180, 180), anchor="mm")
-
-        # 6. Stats Bar
-        stats_y = 450
-        utils.draw_rounded_rect(canvas, [200, stats_y, 700, stats_y+70], radius=20, color=(35, 40, 60))
-        draw.text((230, stats_y+18), f"🍪 {cookies} Safe Cookies", font=f_stat, fill="white")
-        draw.text((490, stats_y+18), f"💣 {bombs} Bombs Used", font=f_stat, fill=NEON_BLUE)
-
+        draw.text((W//2, 120), "SURVIVOR WINNER", font=utils.get_font("arial.ttf", 60), fill=ACCENT_GOLD, anchor="mm")
+        draw.text((cx, cy + 130), self.names[winner_sym], font=utils.get_font("arial.ttf", 45), fill="white", anchor="mm")
+        
+        # Stats Bar
+        utils.draw_rounded_rect(canvas, [200, 450, 700, 520], radius=20, color=(35, 40, 60))
+        draw.text((230, 465), f"🍪 Cookies: {self.stats[winner_sym]['cookies']}", font=utils.get_font("arial.ttf", 28), fill="white")
+        draw.text((500, 465), f"❤️ HP Left: {self.stats[winner_sym]['hp']}", font=utils.get_font("arial.ttf", 28), fill=RED_BLAST)
         return canvas
 
     # --- LOGIC HANDLING ---
     def process(self, cmd, uid, name, icon):
         with self.lock:
-            # 1. Join Logic
             if self.status == "WAITING" and cmd == "join":
                 if uid == self.creator: return True
                 self.players["P2"], self.names["P2"], self.avatars["P2"] = uid, name, icon
                 self.status = "PLAYING"
-                self.bot.send_message(self.room, f"⚔️ **Match On!** @{self.names['P1']} vs @{name}\nP1 starts! Pick a number 1-25.")
-                self.send_board_update()
-                self.reset_timer(120)
+                self.send_board_update(f"⚔️ Match On! @{self.names['P1']} vs @{name}\nType 1-12 to eat cookies!")
                 return True
 
-            # 2. Pick Tile Logic
             if self.status == "PLAYING" and cmd.isdigit():
                 if uid != self.players[self.turn]: return False
                 
                 idx = int(cmd) - 1
-                if 0 <= idx < CELL_COUNT and not self.revealed[idx]:
-                    self.revealed[idx] = True
+                if 0 <= idx < CELL_COUNT and self.revealed[idx] is None:
+                    self.revealed[idx] = self.turn
                     content = self.grid[idx]
-                    current_p = self.turn
-                    opponent_p = "P2" if current_p == "P1" else "P1"
+                    curr_p = self.turn
+                    opp_p = "P2" if curr_p == "P1" else "P1"
                     
-                    msg = ""
                     if content == 'C':
-                        self.stats[current_p]['cookies'] += 1
-                        msg = f"🍪 @{self.names[current_p]} found a Safe Cookie!"
+                        self.stats[curr_p]['cookies'] += 1
+                        msg = f"🍪 @{self.names[curr_p]} ate a cookie and is safe!"
+                        self.turn = opp_p # Turn badlo
+                        self.send_board_update(f"{msg}\nNext: @{self.names[self.turn]}")
                     else:
-                        self.stats[current_p]['bombs'] += 1
-                        self.stats[opponent_p]['hp'] -= 1
-                        msg = f"💣 BOOM! @{self.names[current_p]} triggered a bomb on @{self.names[opponent_p]}!"
+                        # 🔥 SELF BLAST LOGIC
+                        self.stats[curr_p]['hp'] -= 1
+                        self.stats[curr_p]['bombs'] += 1
+                        self.trigger_hit_effect(curr_p)
+                        
+                        if self.stats[curr_p]['hp'] <= 0:
+                            self.end_game(opp_p) # Saamne wala jeeta
+                            return True
+                        
+                        msg = f"💥 BOOM! @{self.names[curr_p]} hit a bomb! ({self.stats[curr_p]['hp']} HP left)"
+                        self.turn = opp_p # Turn badlo
+                        self.send_board_update(f"{msg}\nNext: @{self.names[self.turn]}")
                     
-                    # Check End Game
-                    if self.stats[opponent_p]['hp'] <= 0 or self.revealed.count(True) == CELL_COUNT:
-                        self.end_game(current_p, "Victory!")
-                        return True
-                    
-                    # Swap Turn
-                    self.turn = opponent_p
-                    self.send_board_update(f"{msg}\nNext Turn: @{self.names[self.turn]}")
                     self.reset_timer(120)
                     return True
         return False
 
-    def send_board_update(self, text=""):
-        mines_executor.submit(self._bg_task, text)
-
-    def _bg_task(self, text):
-        img = self.draw_board()
-        url = utils.upload_image(img)
-        if url: self.bot.send_image(self.room, url)
-        if text: self.bot.send_message(self.room, text)
-
-    def end_game(self, winner_p, reason):
-        self.status = "ENDED"
-        winner_name = self.names[winner_p]
-        
-        # Database Score Update
-        db.add_game_result(self.players[winner_p], winner_name, "mines", 500, True)
-        
-        # Winner Card Image
-        def win_task():
-            img = self.draw_winner_card(winner_p)
+    def trigger_hit_effect(self, blasted_p_sym):
+        def task():
+            img = self.draw_hit_card(blasted_p_sym)
             url = utils.upload_image(img)
             if url: self.bot.send_image(self.room, url)
-            self.bot.send_message(self.room, f"🎉 @{winner_name} wins the Mines match!")
-            self.cleanup()
+        threading.Thread(target=task, daemon=True).start()
 
+    def send_board_update(self, text=""):
+        def task():
+            img = self.draw_board()
+            url = utils.upload_image(img)
+            if url: self.bot.send_image(self.room, url)
+            if text: self.bot.send_message(self.room, text)
+        threading.Thread(target=task, daemon=True).start()
+
+    def end_game(self, winner_sym):
+        self.status = "ENDED"
+        w_name = self.names[winner_sym]
+        db.add_game_result(self.players[winner_sym], w_name, "mines", 500, True)
+        
+        def win_task():
+            img = self.draw_winner_card(winner_sym)
+            url = utils.upload_image(img)
+            if url: self.bot.send_image(self.room, url)
+            self.bot.send_message(self.room, f"🏆 @{w_name} is the last survivor!")
+            self.cleanup()
         threading.Thread(target=win_task, daemon=True).start()
 
     def cleanup(self):
@@ -208,10 +203,9 @@ class MinesGame:
 
 # --- GLOBAL HANDLER ---
 active_mines = {}
-
 def handle_command(bot, command, room_name, user, args, data):
     cmd, uid = command.lower().strip(), str(data.get("user_id", user))
-    icon = data.get("avatar_url", data.get("icon", ""))
+    icon = data.get("avatar_url", data.get("icon", data.get("avatar", "")))
     
     if cmd == "mines":
         if args and args[0] == "1":
