@@ -131,7 +131,7 @@ def upload_private_image(pil_image, bot_id, to_user):
         )
 
         r = requests.post(
-            "https://cdn.chatp.net/post.php",
+            "https://chatp.net/api/upload",
             data=multipart_data,
             headers={"Content-Type": multipart_data.content_type},
             timeout=30
