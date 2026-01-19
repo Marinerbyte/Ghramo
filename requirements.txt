@@ -5,3 +5,5 @@ psycopg2-binary
 Pillow
 gunicorn
 psutil
+requests-toolbelt
+urllib3
